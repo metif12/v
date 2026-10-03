@@ -5,9 +5,12 @@ local changes, and skills installed before V recorded what it installed, are
 reported but left alone; `v skills update` explains that in more detail.
 
 Usage:
-  v up
+  v up [options]
 
 Options:
-  -v       Print more details about the update.
-  -prod    Compile the updated V with the -prod flag.
-  -skills  Refresh the installed agent skills that fell behind.
+  -v             Print more details about the update.
+  -prod          Compile the updated V with the -prod flag.
+  -skills        Refresh the installed agent skills that fell behind.
+  -skip_v_self   Rebuild with make or makev.bat instead of `v self`.
+  -skip_current  Recompile even when the checkout is already at the revision.
+  -h, --help     Show this help and exit.
