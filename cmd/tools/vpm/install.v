@@ -107,6 +107,7 @@ fn vpm_install(query []string) {
 fn install_modules(modules []Module, selected_server_url string, mut scope LockScope) {
 	vpm_log(@FILE_LINE, @FN, 'modules: ${modules}')
 	mut errors := 0
+	mut count_requests := []DownloadCountRequest{}
 	for m in modules {
 		vpm_log(@FILE_LINE, @FN, 'module: ${m}')
 		desired_revision := head_revision(m.tmp_path)
@@ -128,19 +129,105 @@ fn install_modules(modules []Module, selected_server_url string, mut scope LockS
 		}
 
 		if !m.is_external {
-			increment_module_download_count(m.name, selected_server_url) or {
-				vpm_error('failed to increment the download count for `${m.name}`',
-					details: err.msg()
-				)
-				errors++
+			count_requests << DownloadCountRequest{
+				name:       m.name
+				server_url: selected_server_url
 			}
 		}
 		println('Installed `${m.name}` in ${m.install_path_fmted} .')
 		m.warn_on_normalized_name()
 	}
+	// The installs above hold shared state and run in dependency order, so they
+	// stay serial. Reporting the downloads is independent of that: each is a
+	// stateless HTTP request, and serialising them costs one round trip per
+	// module for nothing.
+	for name in report_download_counts(count_requests) {
+		vpm_error('failed to increment the download count for `${name}`')
+		errors++
+	}
 	if errors > 0 {
 		exit(1)
 	}
+}
+
+// DownloadCountRequest is one pending download-count report.
+struct DownloadCountRequest {
+	name       string
+	server_url string
+}
+
+// download_count_concurrency bounds how many count reports run at once. A report
+// is a small request that holds no module state, so a fixed bound is enough; the
+// number is kept modest because the same box is often running several vpm
+// processes at once.
+const download_count_concurrency = 4
+
+// drain_download_counts reports one request per index it takes from `work`,
+// until the queue is closed and empty.
+fn drain_download_counts(work chan int, results chan bool, requests []DownloadCountRequest, report fn (DownloadCountRequest) bool) {
+	// The channel is closed once every index is queued, so the receive ends the
+	// loop rather than blocking on an empty queue.
+	for {
+		i := <-work or { break }
+		req := requests[i]
+		results <- report(req)
+	}
+}
+
+// report_download_counts reports several modules' downloads at once and returns
+// the names of those whose report failed. Failures are collected rather than
+// raised, so one unreachable registry does not suppress the rest.
+fn report_download_counts(requests []DownloadCountRequest) []string {
+	return report_all(requests, fn (req DownloadCountRequest) bool {
+		if _ := increment_module_download_count(req.name, req.server_url) {
+			return true
+		}
+		return false
+	})
+}
+
+// report_all runs `report` over every request, up to `download_count_concurrency`
+// at a time, and returns the names of those that failed. It takes the work as a
+// parameter so the pooling can be exercised without reaching a registry.
+fn report_all(requests []DownloadCountRequest, report fn (DownloadCountRequest) bool) []string {
+	mut failed := []string{}
+	if requests.len == 0 {
+		return failed
+	}
+	if requests.len == 1 || download_count_concurrency <= 1 {
+		for req in requests {
+			if !report(req) {
+				failed << req.name
+			}
+		}
+		return failed
+	}
+	workers := if requests.len < download_count_concurrency {
+		requests.len
+	} else {
+		download_count_concurrency
+	}
+	mut work := chan int{cap: requests.len}
+	for i in 0 .. requests.len {
+		work <- i
+	}
+	work.close()
+	// Every request produces exactly one result, so collecting one per request
+	// is what waits for the workers rather than merely counting successes.
+	mut results := chan bool{cap: requests.len}
+	for _ in 0 .. workers {
+		spawn drain_download_counts(work, results, requests, report)
+	}
+	mut ok := []bool{}
+	for _ in 0 .. requests.len {
+		ok << (<-results)
+	}
+	for i, succeeded in ok {
+		if !succeeded {
+			failed << requests[i].name
+		}
+	}
+	return failed
 }
 
 // Module names may contain characters that are not valid in V import paths, e.g. `-`.
