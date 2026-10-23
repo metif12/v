@@ -544,6 +544,10 @@ fn (mut t Transformer) expand_comptime_for(id flat.NodeId, node flat.Node) []fla
 	for fm in t.comptime_field_metas(base_type) {
 		mut cloned := []flat.NodeId{cap: body_stmts.len}
 		for sid in body_stmts {
+			if expanded := t.expand_nested_attribute_loop(sid, var_name, fm.attrs) {
+				cloned << expanded
+				continue
+			}
 			if cid := t.clone_field_subst(sid, var_name, fm) {
 				cloned << cid
 			}
@@ -559,6 +563,44 @@ fn (mut t Transformer) expand_comptime_for(id flat.NodeId, node flat.Node) []fla
 		out << t.make_block(transformed)
 	}
 	return out
+}
+
+// expand_nested_attribute_loop expands `$for x in <outer>.attributes` written inside a
+// field or enum-value comptime loop. Such a loop has no reflected declaration to
+// read from: its attributes are the ones the parser recorded on that field or
+// enum value, which `outer_attrs` carries (vlang/rfcs#35, comptime reflection).
+// Returns none when `sid` is not such a loop, so the caller clones it as usual.
+fn (mut t Transformer) expand_nested_attribute_loop(sid flat.NodeId, outer_var string, outer_attrs []string) ?flat.NodeId {
+	if int(sid) < 0 || int(sid) >= t.a.nodes.len || outer_attrs.len == 0 {
+		return none
+	}
+	node := t.a.nodes[int(sid)]
+	if node.kind != .comptime_for || node.children_count == 0 {
+		return none
+	}
+	inner_var, kind := comptime_for_parts(node.value)
+	if kind != 'attributes' {
+		return none
+	}
+	// The parser stores the base of `<var>.attributes` as the type of `<var>`,
+	// which for a field or enum-value loop variable is its metadata type; the
+	// loop is recognised by that base naming the enclosing loop variable.
+	base := node.typ_text().trim_space()
+	if base != outer_var && t.comptime_for_base_type(base) != outer_var {
+		return none
+	}
+	body_id := t.a.child(&node, 0)
+	body := t.a.nodes[int(body_id)]
+	body_stmts := t.a.children_of(&body).clone()
+	mut out := []flat.NodeId{cap: outer_attrs.len}
+	for attr in comptime_attribute_metas_from_raw(outer_attrs, []int{}) {
+		mut cloned := []flat.NodeId{cap: body_stmts.len}
+		for bsid in body_stmts {
+			cloned << t.clone_attribute_subst(bsid, inner_var, attr)
+		}
+		out << t.make_block(t.transform_scope_stmts(cloned))
+	}
+	return t.make_block(out)
 }
 
 fn (mut t Transformer) expand_comptime_for_attributes(var_name string, source string, body_stmts []flat.NodeId, loop_id flat.NodeId) []flat.NodeId {
@@ -2342,6 +2384,10 @@ fn (mut t Transformer) expand_comptime_for_values(var_name string, base_type str
 	for item in values {
 		mut cloned := []flat.NodeId{cap: body_stmts.len}
 		for sid in body_stmts {
+			if expanded := t.expand_nested_attribute_loop(sid, var_name, item.attrs) {
+				cloned << expanded
+				continue
+			}
 			if cid := t.clone_value_subst(sid, var_name, item) {
 				cloned << cid
 			}
@@ -2859,6 +2905,9 @@ fn (mut t Transformer) clone_value_subst_scoped(id flat.NodeId, var_name string,
 				}
 				'attrs' {
 					return t.make_string_array_literal(item.attrs)
+				}
+				'attributes' {
+					return t.make_attribute_array_literal(comptime_attribute_metas_from_raw(item.attrs, []int{}))
 				}
 				else {}
 			}
@@ -3535,21 +3584,23 @@ fn (t &Transformer) subst_variant_cond(cond string, var_name string, item Varian
 	return result
 }
 
-// make_enum_data_literal builds `EnumData{name: '<name>', value: <value>, attrs: [...]}`.
+// make_enum_data_literal builds `EnumData{name: '<name>', value: <value>, attrs: [...], attributes: [...]}`.
 fn (mut t Transformer) make_enum_data_literal(item EnumValueMeta) flat.NodeId {
-	name_field := t.make_named_field_init('name', t.make_string_literal(item.name), 'string')
-	value_field := t.make_named_field_init('value', t.make_int_literal_typed(item.value.str(), 'i64'), 'i64')
-	attrs_field := t.make_named_field_init('attrs', t.make_string_array_literal(item.attrs), '[]string')
+	name_field := t.make_named_field_init('name', t.make_string_literal(item.name), flat.source_type_string)
+	value_field := t.make_named_field_init('value', t.make_int_literal_typed(item.value.str(), flat.source_type_i64), flat.source_type_i64)
+	attrs_field := t.make_named_field_init('attrs', t.make_string_array_literal(item.attrs), flat.source_type_id('[]string'))
+	attributes_field := t.make_named_field_init('attributes', t.make_attribute_array_literal(comptime_attribute_metas_from_raw(item.attrs, []int{})), flat.source_type_id('[]VAttribute'))
 	start := t.a.children.len
 	t.a.children << name_field
 	t.a.children << value_field
 	t.a.children << attrs_field
+	t.a.children << attributes_field
 	return t.a.add_node(flat.Node{
 		kind:           .struct_init
 		value:          'EnumData'
 		typ:            'EnumData'
 		children_start: start
-		children_count: 3
+		children_count: 4
 	})
 }
 
@@ -3569,23 +3620,24 @@ fn (mut t Transformer) make_variant_data_literal(item VariantMeta) flat.NodeId {
 // make_field_data_literal builds a runtime `FieldData` value for a bare `$for field` variable.
 fn (mut t Transformer) make_field_data_literal(fm FieldMeta) flat.NodeId {
 	fields := [
-		t.make_named_field_init('name', t.make_string_literal(fm.name), 'string'),
-		t.make_named_field_init('typ', t.make_int_literal(fm.typ_id), 'int'),
-		t.make_named_field_init('unaliased_typ', t.make_int_literal(fm.unaliased_id), 'int'),
-		t.make_named_field_init('attrs', t.make_string_array_literal(fm.attrs), '[]string'),
-		t.make_named_field_init('is_pub', t.make_bool_literal(fm.is_pub), 'bool'),
-		t.make_named_field_init('is_mut', t.make_bool_literal(fm.is_mut), 'bool'),
-		t.make_named_field_init('is_embed', t.make_bool_literal(fm.is_embed), 'bool'),
-		t.make_named_field_init('is_shared', t.make_bool_literal(fm.is_shared), 'bool'),
-		t.make_named_field_init('is_atomic', t.make_bool_literal(fm.is_atomic), 'bool'),
-		t.make_named_field_init('is_option', t.make_bool_literal(fm.is_option), 'bool'),
-		t.make_named_field_init('is_array', t.make_bool_literal(fm.is_array), 'bool'),
-		t.make_named_field_init('is_map', t.make_bool_literal(fm.is_map), 'bool'),
-		t.make_named_field_init('is_chan', t.make_bool_literal(fm.is_chan), 'bool'),
-		t.make_named_field_init('is_enum', t.make_bool_literal(fm.is_enum), 'bool'),
-		t.make_named_field_init('is_struct', t.make_bool_literal(fm.is_struct), 'bool'),
-		t.make_named_field_init('is_alias', t.make_bool_literal(fm.is_alias), 'bool'),
-		t.make_named_field_init('indirections', t.make_int_literal(fm.indirections), 'u8'),
+		t.make_named_field_init('name', t.make_string_literal(fm.name), flat.source_type_string),
+		t.make_named_field_init('typ', t.make_int_literal(fm.typ_id), flat.source_type_int),
+		t.make_named_field_init('unaliased_typ', t.make_int_literal(fm.unaliased_id), flat.source_type_int),
+		t.make_named_field_init('attrs', t.make_string_array_literal(fm.attrs), flat.source_type_id('[]string')),
+		t.make_named_field_init('attributes', t.make_attribute_array_literal(comptime_attribute_metas_from_raw(fm.attrs, []int{})), flat.source_type_id('[]VAttribute')),
+		t.make_named_field_init('is_pub', t.make_bool_literal(fm.is_pub), flat.source_type_bool),
+		t.make_named_field_init('is_mut', t.make_bool_literal(fm.is_mut), flat.source_type_bool),
+		t.make_named_field_init('is_embed', t.make_bool_literal(fm.is_embed), flat.source_type_bool),
+		t.make_named_field_init('is_shared', t.make_bool_literal(fm.is_shared), flat.source_type_bool),
+		t.make_named_field_init('is_atomic', t.make_bool_literal(fm.is_atomic), flat.source_type_bool),
+		t.make_named_field_init('is_option', t.make_bool_literal(fm.is_option), flat.source_type_bool),
+		t.make_named_field_init('is_array', t.make_bool_literal(fm.is_array), flat.source_type_bool),
+		t.make_named_field_init('is_map', t.make_bool_literal(fm.is_map), flat.source_type_bool),
+		t.make_named_field_init('is_chan', t.make_bool_literal(fm.is_chan), flat.source_type_bool),
+		t.make_named_field_init('is_enum', t.make_bool_literal(fm.is_enum), flat.source_type_bool),
+		t.make_named_field_init('is_struct', t.make_bool_literal(fm.is_struct), flat.source_type_bool),
+		t.make_named_field_init('is_alias', t.make_bool_literal(fm.is_alias), flat.source_type_bool),
+		t.make_named_field_init('indirections', t.make_int_literal(fm.indirections), flat.source_type_u8),
 	]
 	start := t.a.children.len
 	for field in fields {
@@ -5027,6 +5079,9 @@ fn (mut t Transformer) field_member_value(member string, fm FieldMeta) ?flat.Nod
 		'is_pub' { t.make_bool_literal(fm.is_pub) }
 		'indirections' { t.make_int_literal(fm.indirections) }
 		'attrs' { t.make_string_array_literal(fm.attrs) }
+		'attributes' {
+			t.make_attribute_array_literal(comptime_attribute_metas_from_raw(fm.attrs, []int{}))
+		}
 		'typ' { t.make_int_literal(fm.typ_id) }
 		'unaliased_typ' { t.make_int_literal(fm.unaliased_id) }
 		else {

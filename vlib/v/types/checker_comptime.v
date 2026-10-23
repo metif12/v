@@ -533,6 +533,9 @@ fn (tc &TypeChecker) comptime_static_metadata_member_type(member string, loop_ki
 			'attrs' {
 				tc.parse_type('[]string')
 			}
+			'attributes' {
+				tc.parse_type(flat.source_type_id('[]VAttribute'))
+			}
 			else {
 				none
 			}
@@ -547,6 +550,9 @@ fn (tc &TypeChecker) comptime_static_metadata_member_type(member string, loop_ki
 		}
 		'attrs' {
 			tc.parse_type('[]string')
+		}
+		'attributes' {
+			tc.parse_type(flat.source_type_id('[]VAttribute'))
 		}
 		'indirections' {
 			tc.parse_type('u8')
