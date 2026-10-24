@@ -52,21 +52,11 @@ $if darwin {
 			return unsafe { nil }
 		}
 		len := usize(C.strlen(value))
-		copy := &char(C.calloc(len + 1, 1))
-		if copy == unsafe { nil } {
+		dup := &char(C.calloc(len + 1, 1))
+		if dup == unsafe { nil } {
 			return unsafe { nil }
 		}
-		C.memcpy(copy, value, len)
-		return copy
-	}
-
-	@[export: 'v_multiwindow_appkit_copy_string']
-	fn v_multiwindow_appkit_copy_string(value &char) &char {
-		return v_multiwindow_appkit_copy_cstring(value)
-	}
-
-	@[export: 'v_multiwindow_appkit_number_string']
-	fn v_multiwindow_appkit_number_string(value f64) voidptr {
-		return macos.nsstring('')
+		C.memcpy(dup, value, len)
+		return dup
 	}
 }
