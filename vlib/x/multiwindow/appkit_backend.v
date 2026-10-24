@@ -59,4 +59,14 @@ $if darwin {
 		C.memcpy(copy, value, len)
 		return copy
 	}
+
+	@[export: 'v_multiwindow_appkit_copy_string']
+	fn v_multiwindow_appkit_copy_string(value &char) &char {
+		return v_multiwindow_appkit_copy_cstring(value)
+	}
+
+	@[export: 'v_multiwindow_appkit_number_string']
+	fn v_multiwindow_appkit_number_string(value f64) voidptr {
+		return macos.nsstring('')
+	}
 }
