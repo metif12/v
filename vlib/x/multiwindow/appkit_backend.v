@@ -60,3 +60,11 @@ $if darwin {
 		return dup
 	}
 }
+
+// TODO(appkit-port): the rest of appkit_backend.m (~4500 lines: NSWindow/
+// NSView delegates, Metal layer, event pump) intentionally stays in
+// Objective-C; only pure helpers live here. Do not port
+// v_multiwindow_appkit_next_event_sequence (mutable counter + exhausted
+// flag), v_multiwindow_appkit_keycodes / v_multiwindow_appkit_key_code
+// (128-entry table + bounds lookup), or v_multiwindow_appkit_cursor_for_shape
+// (NSCursor objects per shape) without reproducing their exact behavior.
