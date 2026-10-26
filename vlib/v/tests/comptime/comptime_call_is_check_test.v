@@ -6,7 +6,7 @@ struct Struct1 {
 
 pub type DoThingFunc = fn (f32) bool
 
-fn (mut s Struct1) do_thing(a f32) bool {
+fn (mut s Struct1) do_thing(_a f32) bool {
 	return false
 }
 
