@@ -41,6 +41,23 @@ Current slow-lane candidates include FreeBSD, OpenBSD, Termux, `riscv64`, `s390x
 the full sanitizer matrix, and full ecosystem compilation workflows. These checks are
 valuable; the policy is to run them where they provide useful signal, not to remove them.
 
+## Notice debt (`v -N`)
+
+`v -N` turns V notices into errors. vlib is not clean under `-N` yet, so the
+`notices_ci.yml` lane gates the modules that are clean today and reports the
+rest:
+
+- `notices-gate` (blocking): runs `v -N test vlib/<module>` for the modules
+  listed in `NOTICE_GATE_MODULES`, on Linux, macOS and Windows, on every PR
+  and push to `master`.
+- `notices-sweep` (advisory, weekly): runs the same command for every other
+  module and posts the newly-clean ones as candidates for the list.
+
+A module joins `NOTICE_GATE_MODULES` once its own `v -N test vlib/<module>` run
+is clean. Do not drop a module from the list to make a PR green; fix the
+notice. The current inventory and the classes of remaining debt are tracked in
+the `notices_ci.yml` header comment and the PR that introduced the lane.
+
 ## Runner policy
 
 ### General guidance
