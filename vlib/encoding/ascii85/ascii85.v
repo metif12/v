@@ -50,9 +50,7 @@ pub fn encode(data []u8) string {
 }
 
 // decode returns the bytes represented by the ASCII85 string `s`.
-// ASCII whitespace is ignored. 'z' expands to four zero bytes.
-// Invalid characters, misplaced 'z', one-character trailing groups, and
-// groups that overflow 32 bits are errors. Adobe delimiters are not accepted.
+// Whitespace is ignored. 'z' expands to four zero bytes.
 pub fn decode(s string) ![]u8 {
 	mut out := []u8{}
 	mut buf := []u8{}
@@ -76,7 +74,10 @@ pub fn decode(s string) ![]u8 {
 		}
 		buf << u8(idx)
 		if buf.len == 5 {
-			val := decode_group(buf)!
+			mut val := u32(0)
+			for b in buf {
+				val = val * 85 + u32(b)
+			}
 			out << u8(val >> 24)
 			out << u8((val >> 16) & 0xFF)
 			out << u8((val >> 8) & 0xFF)
@@ -93,7 +94,10 @@ pub fn decode(s string) ![]u8 {
 		for buf.len < 5 {
 			buf << u8(84)
 		}
-		val := decode_group(buf)!
+		mut val := u32(0)
+		for b in buf {
+			val = val * 85 + u32(b)
+		}
 		n := orig - 1
 		if n >= 1 {
 			out << u8(val >> 24)
@@ -109,15 +113,4 @@ pub fn decode(s string) ![]u8 {
 		}
 	}
 	return out
-}
-
-fn decode_group(group []u8) !u32 {
-	mut val := u64(0)
-	for digit in group {
-		val = val * 85 + u64(digit)
-	}
-	if val > u64(0xFFFFFFFF) {
-		return error('ascii85: group overflows 32 bits')
-	}
-	return u32(val)
 }
