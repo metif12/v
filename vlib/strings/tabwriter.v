@@ -1,34 +1,32 @@
 module strings
 
-// TabWriter collects tabular rows and aligns their columns with spaces.
-// Widths count runes, not terminal display columns. Rows are added with
-// write_row; render returns the aligned text. Negative sizes are treated as zero.
+// TabWriter collects tabular rows and renders them aligned into columns,
+// similar to Go's text/tabwriter. Rows are added with write_row; render
+// returns the aligned text.
 pub struct TabWriter {
 pub mut:
-	min_width int // Minimum content width before padding.
-	padding   int = 1 // Extra spacing after each column except the last.
+	min_width int
+	tab_width int = 8
+	padding   int = 1
 mut:
 	rows [][]string
 }
 
-// write_row appends a copy of the row of columns. Cell contents are preserved literally.
+// write_row appends a row of columns.
 pub fn (mut w TabWriter) write_row(cols []string) {
 	w.rows << cols.clone()
 }
 
-// reset clears all collected rows while keeping the configuration.
+// reset clears all collected rows.
 pub fn (mut w TabWriter) reset() {
 	w.rows = [][]string{}
 }
 
-// render returns the rows formatted into aligned columns without clearing them.
-// Missing cells are empty, and the final column is not padded.
-// It panics if the requested column width overflows int.
+// render returns the rows formatted into aligned columns.
 pub fn (w TabWriter) render() string {
 	if w.rows.len == 0 {
 		return ''
 	}
-	padding := if w.padding > 0 { w.padding } else { 0 }
 	// number of columns = max row length
 	mut ncols := 0
 	for row in w.rows {
@@ -50,9 +48,6 @@ pub fn (w TabWriter) render() string {
 		if widths[c] < w.min_width {
 			widths[c] = w.min_width
 		}
-		if c < ncols - 1 && padding > max_int - widths[c] {
-			panic('strings.TabWriter: column width overflow')
-		}
 	}
 	mut out := []string{}
 	for row in w.rows {
@@ -62,8 +57,12 @@ pub fn (w TabWriter) render() string {
 			if c == ncols - 1 {
 				parts << cell
 			} else {
-				pad := widths[c] - cell.runes().len + padding
-				parts << cell + repeat(` `, pad)
+				pad := widths[c] - cell.runes().len + w.padding
+				mut p := cell
+				for _ in 0 .. pad {
+					p += ' '
+				}
+				parts << p
 			}
 		}
 		out << parts.join('')
