@@ -25293,6 +25293,13 @@ fn transform_is_anonymous_struct_name(name_id u32) bool {
 
 // transform_struct_init transforms transform struct init data for transform.
 fn (mut t Transformer) transform_struct_init(id flat.NodeId, node flat.Node) flat.NodeId {
+	if !isnil(t.tc) {
+		if typ := t.tc.expr_type(id) {
+			if typ is types.Channel {
+				t.mark_fn_used('sync.new_channel_st')
+			}
+		}
+	}
 	if node.value_text() == 'struct' || transform_is_anonymous_struct_name(node.source_value_id()) {
 		mut concrete_type := t.raw_checker_node_type(id)
 		if !transform_is_anonymous_struct_name(concrete_type) && t.expected_expr_node == int(id)
