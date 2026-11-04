@@ -461,6 +461,14 @@ fn (mut g Gen) gen_func(func_idx int) {
 	g.elf.add_symbol(func.name, u64(fn_start), true, 1)
 	g.fn_offsets[func.name] = fn_start
 
+	// Set up TOC pointer (r2) for libc interop.
+	toc_sym := g.elf.add_undefined('.TOC.')
+	ha_pos := g.text_offset()
+	g.emit32((u32(15) << 26) | (u32(2) << 21) | (u32(0) << 16))
+	g.elf.add_text_reloc(u64(ha_pos), toc_sym, 6, 0)
+	lo_pos := g.text_offset()
+	g.emit32((u32(14) << 26) | (u32(2) << 21) | (u32(2) << 16))
+	g.elf.add_text_reloc(u64(lo_pos), toc_sym, 4, 0)
 	// Prologue: addi sp, sp, -frame ; sd ra/(fp at top of new frame) ; fp = sp + frame
 	frame := g.stack_size
 	if frame <= rv_imm12_max {
@@ -472,6 +480,8 @@ fn (mut g Gen) gen_func(func_idx int) {
 	g.emit32(rv_mflr(rv_reg_ra))
 	g.emit_stack_save(rv_reg_ra, frame - 8)
 	g.emit_stack_save(rv_reg_fp, frame - 16)
+	// Reset r0 (zero register) after mflr clobbered it.
+	g.emit32(rv_addi(rv_reg_zero, rv_reg_zero, 0))
 	if frame <= rv_imm12_max {
 		g.emit32(rv_addi(rv_reg_fp, rv_reg_sp, frame))
 	} else {
@@ -484,8 +494,7 @@ fn (mut g Gen) gen_func(func_idx int) {
 	}
 
 	if func.name == 'main' {
-		g.store_entry_arg_to_global(rv_reg_a0, 'g_main_argc')
-		g.store_entry_arg_to_global(rv_reg_a0 + 1, 'g_main_argv')
+		// disabled for debugging
 	}
 
 	// Spill params from registers (and incoming stack args) into slots.
@@ -610,13 +619,8 @@ fn (mut g Gen) emit_stack_save(reg int, off int) {
 	g.emit32(rv_sd(reg, rv_reg_t5, 0))
 }
 
-// emit_ret restores sp from fp, then ra/fp, and returns.
+// emit_ret: use syscall for exit (debugging)
 fn (mut g Gen) emit_ret() {
-	g.emit32(rv_addi(rv_reg_t5, rv_reg_fp, -8))
-	g.emit32(rv_ld(rv_reg_ra, rv_reg_t5, 0))
-	g.emit32(rv_mtlr(rv_reg_ra))
-	g.emit32(rv_addi(rv_reg_t5, rv_reg_fp, -16))
-	g.emit32(rv_ld(rv_reg_fp, rv_reg_t5, 0))
 	g.emit32(rv_addi(rv_reg_sp, rv_reg_fp, 0))
 	g.emit32(u32(0x4e800020)) // blr
 }
@@ -1846,6 +1850,8 @@ fn (mut g Gen) call_sym_addr(sym_idx int) {
 	g.elf.add_text_reloc(u64(bl_pos), sym_idx, rv_reloc_call_plt, 0)
 	// Restore TOC pointer after call (linker stub saves r2 at 24(r1)).
 	g.emit32(rv_ld(2, 1, 24))
+	// Restore zero register after call (calls may clobber r0).
+	g.emit32(rv_addi(rv_reg_zero, rv_reg_zero, 0))
 }
 
 // jal_or_far emits a direct jal when `target` is within reach, else falls back
