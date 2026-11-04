@@ -16406,7 +16406,7 @@ fn (mut g FlatGen) const_expr_to_string(id flat.NodeId, seen []string) string {
 					g.value_c_type(unalias_type(shift_type))
 				}
 				op := if node.op == .left_shift { '<<' } else { '>>' }
-				'((u64)(${rhs}) >= ${bits} ? (${ct})0 : (${ct})((${ct})(${lhs}) ${op} (${rhs})))'
+				'((u64)(${rhs}) >= ${bits} ? (${ct})0 : (${ct})((${ut})(${lhs}) ${op} (${rhs})))'
 			} else if node.op == .right_shift_unsigned {
 				// `>>>` must stay a logical shift in const initializers too;
 				// op_str would map it to a plain arithmetic `>>`. The operands
@@ -28212,7 +28212,11 @@ fn (mut g FlatGen) gen_guarded_shift_from_text(lhs_text string, rhs_id flat.Node
 	ut, bits := g.unsigned_shift_type_parts(lhs_type)
 	value_type := g.value_c_type(unalias_type(lhs_type))
 	result_type := if op == .right_shift_unsigned { ut } else { value_type }
-	lhs_type_name := if op == .right_shift_unsigned { ut } else { value_type }
+	// Left shifts use the unsigned counterpart as the operand type so a
+	// negative signed value or an overflowing result never executes a signed
+	// C `<<`, which would be undefined behavior. The result is converted back
+	// to the signed destination type, giving defined wrapping semantics.
+	lhs_type_name := if op in [.left_shift, .right_shift_unsigned] { ut } else { value_type }
 	op_text := if op == .left_shift { '<<' } else { '>>' }
 	if count := g.shift_count_const_value(rhs_id, []string{}) {
 		if width := fixed_integer_c_type_width(value_type) {
@@ -28236,7 +28240,11 @@ fn (mut g FlatGen) gen_guarded_shift_from_text(lhs_text string, rhs_id flat.Node
 				kind.helper_suffix()
 			}
 			helper := if op == .left_shift { 'shl' } else { 'shr' }
-			g.write('({ ${lhs_type_name} ${lhs_tmp} = (${lhs_type_name})(${lhs_text}); i64 ${rhs_tmp} = (i64)(')
+			// The overflow helpers take the operand in its declared (possibly
+			// signed) type and perform the unsigned shift internally, so declare
+			// the temp with value_type here even though the non-checked path
+			// below shifts through the unsigned counterpart.
+			g.write('({ ${value_type} ${lhs_tmp} = (${value_type})(${lhs_text}); i64 ${rhs_tmp} = (i64)(')
 			g.gen_shift_count_value(rhs_id)
 			g.write('); (${result_type})builtin__overflow__${helper}_${suffix}(${lhs_tmp}, ${rhs_tmp}); })')
 			return

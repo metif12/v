@@ -999,6 +999,23 @@ fn (mut g Gen) gen_instr(val_id int) {
 			}
 			lhs_reg := g.load_val(instr.operands[0], 8)
 			rhs_reg := g.load_val(instr.operands[1], 9)
+			is_shift := instr.op in [.shl, .ashr, .lshr]
+			mut oversized_jump := 0
+			mut end_jump := 0
+			if is_shift {
+				// ssa Type.width is in bits (see v.ssa TypeStore constructors),
+				// so this is the exact oversized threshold for 8/16/32-bit
+				// values. Widths outside 0 < w < 64 (e.g. i128 lowered through
+				// helpers, unknown widths) fall back to 64, matching the x64
+				// backend guard.
+				width := g.m.type_store.types[g.m.values[instr.operands[0]].typ].width
+				width_const := if width > 0 && width < 64 { width } else { 64 }
+				g.emit_mov_imm(10, width_const)
+				g.emit32(asm_cmp_reg(Reg(rhs_reg), Reg(10)))
+				oversized_jump = g.text_offset()
+				// Unsigned >= so negative counts also take the oversized path to 0.
+				g.emit32(asm_b_cond(cond_hs, 0))
+			}
 			match instr.op {
 				.add {
 					g.emit32(asm_add_reg(Reg(8), Reg(lhs_reg), Reg(rhs_reg)))
@@ -1042,6 +1059,14 @@ fn (mut g Gen) gen_instr(val_id int) {
 					g.emit32(asm_lsrv(Reg(8), Reg(lhs_reg), Reg(rhs_reg)))
 				}
 				else {}
+			}
+			if is_shift {
+				end_jump = g.text_offset()
+				g.emit32(asm_b(0))
+				g.patch_b_cond(oversized_jump, (g.text_offset() - oversized_jump) / 4)
+				g.emit_mov_imm(8, 0)
+				// Patch unconditional b (26-bit).
+				g.patch_branch(end_jump, (g.text_offset() - end_jump) / 4)
 			}
 
 			g.store_val(8, val_id)
@@ -2320,6 +2345,15 @@ fn (mut g Gen) patch_branch(text_pos int, offset int) {
 	opcode := existing & 0xFC000000
 	imm26 := u32(offset) & 0x03FFFFFF
 	g.text_words[word_index] = opcode | imm26
+}
+
+// patch_b_cond patches a `b.cond` instruction at text_pos with a new word
+// offset, preserving the condition code. patch_branch only handles the 26-bit
+// unconditional `b` encoding and would clobber the cond field.
+fn (mut g Gen) patch_b_cond(text_pos int, offset int) {
+	word_index := text_pos / 4
+	existing := g.text_words[word_index]
+	g.text_words[word_index] = (existing & ~u32(0x7FFFF << 5)) | (u32(offset & 0x7FFFF) << 5)
 }
 
 // ==================== Low-level emission helpers ====================

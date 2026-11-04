@@ -478,6 +478,11 @@ const cond_eq = u32(0x0) // equal
 
 const cond_ne = u32(0x1) // not equal
 
+// cond_hs is the unsigned higher-or-same (carry set) condition, used for
+// `rhs >= width` shift-count guards so negative counts trap to the oversized
+// path and yield 0.
+const cond_hs = u32(0x2) // unsigned higher or same
+
 const cond_lt = u32(0xB) // less than (signed)
 
 const cond_gt = u32(0xC) // greater than (signed)
