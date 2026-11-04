@@ -1,5 +1,7 @@
 module hex
 
+import strings
+
 const hex_digits = '0123456789abcdef'
 const hex_digits_upper = '0123456789ABCDEF'
 
@@ -96,4 +98,43 @@ fn char2nibble(b u8, index int) !u8 {
 		`a`...`f` { return b - u8(`a`) + 10 }
 		else { return error('invalid hex char ${b.ascii_str()} at index ${index}') }
 	}
+}
+
+// dump returns a hex dump of `data` in the canonical form used by Go's
+// encoding/hex.Dump.
+pub fn dump(data []u8) string {
+	mut sb := strings.new_builder(data.len * 3 + 1)
+	mut i := 0
+	for i < data.len {
+		// offset
+		sb.write_string('${i:08x}  ')
+		// hex bytes
+		for j in 0 .. 16 {
+			if i + j < data.len {
+				sb.write_string('${data[i + j]:02x} ')
+				if j == 7 {
+					sb.write_byte(` `)
+				}
+			} else {
+				sb.write_string('   ')
+				if j == 7 {
+					sb.write_byte(` `)
+				}
+			}
+		}
+		sb.write_string(' |')
+		for j in 0 .. 16 {
+			if i + j < data.len {
+				b := data[i + j]
+				if b >= 32 && b < 127 {
+					sb.write_byte(b)
+				} else {
+					sb.write_byte(`.`)
+				}
+			}
+		}
+		sb.write_string('|\n')
+		i += 16
+	}
+	return sb.str()
 }
