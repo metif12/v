@@ -587,7 +587,9 @@ fn shl_i8(x i8, n i64) i8 {
 	if n < 0 || n >= 8 {
 		panic('attempt to shl with overflow(i8(${x}) << ${n})')
 	}
-	return x << n
+	// Shift through the unsigned counterpart so a negative operand never
+	// executes a signed C `<<`, which would be undefined behavior.
+	return i8(u8(x) << n)
 }
 
 // shr_i8 computes `x` >> `n` for i8 values, and panic if `n` is negative or at least 8
@@ -623,7 +625,9 @@ fn shl_i16(x i16, n i64) i16 {
 	if n < 0 || n >= 16 {
 		panic('attempt to shl with overflow(i16(${x}) << ${n})')
 	}
-	return x << n
+	// Shift through the unsigned counterpart so a negative operand never
+	// executes a signed C `<<`, which would be undefined behavior.
+	return i16(u16(x) << n)
 }
 
 // shr_i16 computes `x` >> `n` for i16 values, and panic if `n` is negative or at least 16
@@ -659,7 +663,9 @@ fn shl_i32(x i32, n i64) i32 {
 	if n < 0 || n >= 32 {
 		panic('attempt to shl with overflow(i32(${x}) << ${n})')
 	}
-	return x << n
+	// Shift through the unsigned counterpart so a negative operand never
+	// executes a signed C `<<`, which would be undefined behavior.
+	return i32(u32(x) << n)
 }
 
 // shr_i32 computes `x` >> `n` for i32 values, and panic if `n` is negative or at least 32
@@ -695,7 +701,9 @@ fn shl_i64(x i64, n i64) i64 {
 	if n < 0 || n >= 64 {
 		panic('attempt to shl with overflow(i64(${x}) << ${n})')
 	}
-	return x << n
+	// Shift through the unsigned counterpart so a negative operand never
+	// executes a signed C `<<`, which would be undefined behavior.
+	return i64(u64(x) << n)
 }
 
 // shr_i64 computes `x` >> `n` for i64 values, and panic if `n` is negative or at least 64
