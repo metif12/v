@@ -583,6 +583,7 @@ fn closing_index(s string, start int) int {
 	return s.len - 1
 }
 
+@[unsafe]
 fn (mut d Doc) parse_file(path string) ! {
 	source := os.read_file(path)!
 	mut assigned_comments := map[int]bool{}
@@ -655,7 +656,14 @@ fn (mut d Doc) parse_file(path string) ! {
 		if anchor_line < first_declaration_line {
 			first_declaration_line = anchor_line
 		}
-		mut doc_node := d.node_from_flat(a, source, id, path) or { continue }
+		mut doc_node := d.node_from_flat(a, source, id, path) or {
+			// The comments of a symbol that is not documented, like a private one, or one that
+			// a symbol filter leaves out, are about it, not about the module.
+			if d.with_comments {
+				comments_before(a, source, end_lines, anchor_line, mut assigned_comments)
+			}
+			continue
+		}
 		if d.with_comments {
 			doc_node.comments = comments_before(a, source, end_lines, anchor_line, mut assigned_comments)
 		}
@@ -1490,6 +1498,7 @@ fn collect_module_subdirs(root string, dir string, mut active map[string]bool, m
 }
 
 // generate populates this Doc from its input directory.
+@[unsafe]
 pub fn (mut d Doc) generate() ! {
 	d.base_path = if os.is_dir(d.base_path) {
 		d.base_path
@@ -1542,6 +1551,7 @@ pub fn (mut d Doc) generate() ! {
 }
 
 // generate documents a file or directory.
+@[unsafe]
 pub fn generate(input_path string, pub_only bool, with_comments bool, platform Platform, filter_symbol_names ...string) !Doc {
 	return generate_with_subdir_filter(input_path, unsafe { nil }, pub_only, with_comments,
 		platform, ...filter_symbol_names)

@@ -1,6 +1,5 @@
 module types
 
-import v.flat
 import v.workers
 
 const min_parallel_selected_fn_bodies = 64
@@ -59,6 +58,7 @@ fn selected_fn_frontier_scan_batch(arg voidptr) {
 	return
 }
 
+@[unsafe]
 fn selected_fn_frontier_scan_thread(arg voidptr) voidptr {
 	args := unsafe { &SelectedFnFrontierWorkerArgs(arg) }
 	batches := unsafe { &[]SelectedFnFrontierScanArgs(args.batches) }

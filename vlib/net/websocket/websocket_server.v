@@ -1,7 +1,6 @@
 module websocket
 
 import net
-import net.ssl
 import log
 import time
 import rand
@@ -48,6 +47,7 @@ pub:
 }
 
 // new_server instance a new websocket server on provided port and route
+@[unsafe]
 pub fn new_server(family net.AddrFamily, port int, route string, opt ServerOpt) &Server {
 	return &Server{
 		ls:     unsafe { nil }
@@ -230,7 +230,6 @@ fn (mut s Server) accept_new_client() !&Client {
 	c := &Client{
 		is_server:    true
 		conn:         new_conn
-		ssl_conn:     ssl.new_ssl_conn()!
 		logger:       s.logger
 		client_state: ClientState{
 			state: .open

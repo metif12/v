@@ -3,7 +3,7 @@ module macos
 // vfmt off
 #flag darwin -framework Foundation
 #flag darwin -lobjc
-#insert "@VEXEROOT/vlib/macos/objc_bridge.h"
+#preinclude "@VEXEROOT/vlib/macos/objc_bridge.h"
 
 pub type Id = voidptr
 pub type Sel = voidptr
@@ -464,6 +464,7 @@ pub fn nsstring(s string) Id {
 	return C.macos_objc_msg_id1(get_class('NSString'), sel('stringWithUTF8String:'), &char(s.str))
 }
 
+@[unsafe]
 pub fn utf8_string(obj Id) string {
 	if obj == unsafe { nil } {
 		return ''
@@ -475,6 +476,7 @@ pub fn utf8_string(obj Id) string {
 	return unsafe { cstr.vstring().clone() }
 }
 
+@[unsafe]
 pub fn description_string(obj Id) string {
 	if obj == unsafe { nil } {
 		return ''
@@ -482,7 +484,7 @@ pub fn description_string(obj Id) string {
 	return utf8_string(C.macos_objc_msg_id0(obj, sel('description')))
 }
 
-@[inline]
+@[inline; unsafe]
 pub fn retain(obj Id) Id {
 	if obj == unsafe { nil } {
 		return unsafe { nil }
@@ -490,7 +492,7 @@ pub fn retain(obj Id) Id {
 	return C.macos_objc_msg_id0(obj, sel('retain'))
 }
 
-@[inline]
+@[inline; unsafe]
 pub fn release(obj Id) {
 	if obj == unsafe { nil } {
 		return

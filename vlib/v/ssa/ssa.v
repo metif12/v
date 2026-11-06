@@ -403,15 +403,19 @@ pub mut:
 // TargetData represents target data data used by ssa.
 pub struct TargetData {
 pub:
-	ptr_size      int  = 8
-	endian_little bool = true
+	ptr_size      int    = 8
+	endian_little bool   = true
+	os_is_linux   bool   = false
+	backend       string = ''
 }
 
 // Module represents module data used by ssa.
 @[heap]
 pub struct Module {
 pub mut:
-	name       string
+	name string
+	// errors contains unsupported source expressions encountered during SSA construction.
+	errors     []string
 	target     TargetData
 	track_uses bool = true
 	type_store TypeStore

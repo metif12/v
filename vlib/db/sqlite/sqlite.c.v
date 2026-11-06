@@ -148,6 +148,7 @@ fn sqlite_cstring(s string) &char {
 }
 
 //
+@[unsafe]
 fn C.sqlite3_open(&char, &&C.sqlite3) i32
 
 fn C.sqlite3_close(&C.sqlite3) i32
@@ -190,6 +191,8 @@ fn C.sqlite3_errmsg(&C.sqlite3) &char
 fn C.sqlite3_free(voidptr)
 
 fn C.sqlite3_changes(&C.sqlite3) i32
+
+fn C.sqlite3_get_autocommit(&C.sqlite3) i32
 
 // connect Opens the connection with a database.
 pub fn connect(path string) !DB {
@@ -249,6 +252,7 @@ pub fn (db &DB) get_affected_rows_count() int {
 }
 
 // q_int returns a single integer value, from the first column of the result of executing `query`, or an error on failure
+@[unsafe]
 pub fn (db &DB) q_int(query string) !int {
 	$if trace_sqlite ? {
 		eprintln('> q_int query: "${query}"')
@@ -270,6 +274,7 @@ pub fn (db &DB) q_int(query string) !int {
 }
 
 // q_string returns a single string value, from the first column of the result of executing `query`, or an error on failure
+@[unsafe]
 pub fn (db &DB) q_string(query string) !string {
 	$if trace_sqlite ? {
 		eprintln('> q_string query: "${query}"')
@@ -291,6 +296,7 @@ pub fn (db &DB) q_string(query string) !string {
 }
 
 // exec_map executes the query on the given `db`, and returns an array of maps of strings, or an error on failure
+@[unsafe]
 pub fn (db &DB) exec_map(query string) ![]map[string]string {
 	$if trace_sqlite ? {
 		eprintln('> exec_map query: "${query}"')
@@ -302,6 +308,10 @@ pub fn (db &DB) exec_map(query string) ![]map[string]string {
 	}
 	defer {
 		C.sqlite3_finalize(stmt)
+	}
+	if stmt == unsafe { nil } {
+		// an empty or comment-only query compiles to no statement, and stepping it is a misuse
+		return []map[string]string{}
 	}
 	nr_cols := C.sqlite3_column_count(stmt)
 	mut col_names := []string{cap: nr_cols}
@@ -323,9 +333,13 @@ pub fn (db &DB) exec_map(query string) ![]map[string]string {
 		}
 		rows << row
 	}
+	if is_error(res) {
+		return db.error_message(res, query)
+	}
 	return rows
 }
 
+@[unsafe]
 fn C.sqlite3_memory_used() i64
 
 // exec executes the query on the given `db`, and returns an array of all the results, or an error on failure
@@ -340,6 +354,10 @@ pub fn (db &DB) exec(query string) ![]Row {
 	}
 	defer {
 		C.sqlite3_finalize(stmt)
+	}
+	if stmt == unsafe { nil } {
+		// an empty or comment-only query compiles to no statement, and stepping it is a misuse
+		return []Row{}
 	}
 	nr_cols := C.sqlite3_column_count(stmt)
 	mut col_names := []string{cap: nr_cols}
@@ -366,6 +384,9 @@ pub fn (db &DB) exec(query string) ![]Row {
 			}
 		}
 		rows << row
+	}
+	if is_error(res) {
+		return db.error_message(res, query)
 	}
 	return rows
 }
@@ -403,6 +424,7 @@ pub fn (db &DB) error_message(code int, query string) IError {
 // exec_none executes a query, and returns the integer SQLite result code.
 // Use it, in case you don't expect any row results, but still want a result code.
 // e.g. for queries like these: `INSERT INTO ... VALUES (...)`
+@[unsafe]
 pub fn (db &DB) exec_none(query string) int {
 	$if trace_sqlite ? {
 		eprintln('> exec_none query: "${query}"')
@@ -421,6 +443,7 @@ pub fn (db &DB) exec_none(query string) int {
 
 // exec_param_many executes a query with parameters provided as ?,
 // and returns either an error on failure, or the full result set on success
+@[unsafe]
 pub fn (db &DB) exec_param_many(query string, params Params) ![]Row {
 	$if trace_sqlite ? {
 		eprintln('> exec_param_many query: "${query}", params: ${params}')
@@ -604,7 +627,11 @@ pub fn (mut db DB) commit() ! {
 }
 
 // rollback rollbacks the current transaction.
+// It does nothing when no transaction is active, e.g. after SQLite rolled it back on an error.
 pub fn (mut db DB) rollback() ! {
+	if !db.in_transaction() {
+		return
+	}
 	db.exec('ROLLBACK;')!
 }
 
@@ -612,6 +639,10 @@ pub fn (mut db DB) rollback() ! {
 pub fn (mut db DB) rollback_to(savepoint string) ! {
 	if !savepoint.is_identifier() {
 		return error('savepoint should be a identifier string')
+	}
+	if !db.in_transaction() {
+		// an error already rolled back the whole transaction, and its savepoints with it
+		return
 	}
 	db.exec('ROLLBACK TO ${savepoint};')!
 }
@@ -621,7 +652,17 @@ pub fn (mut db DB) release_savepoint(savepoint string) ! {
 	if !savepoint.is_identifier() {
 		return error('savepoint should be a identifier string')
 	}
+	if !db.in_transaction() {
+		// an error already rolled back the whole transaction, and its savepoints with it
+		return
+	}
 	db.exec('RELEASE SAVEPOINT ${savepoint};')!
+}
+
+// in_transaction reports whether a transaction is active on the connection.
+// SQLite ends a transaction on its own after some errors, see https://www.sqlite.org/c3ref/get_autocommit.html
+fn (db &DB) in_transaction() bool {
+	return C.sqlite3_get_autocommit(db.conn) == 0
 }
 
 // tables returns the names of all user tables in the database.

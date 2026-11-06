@@ -2255,7 +2255,7 @@ fn interface_box_scan_reads_kind(kind flat.NodeKind) bool {
 	}
 }
 
-@[direct_array_access]
+@[direct_array_access; unsafe]
 fn (mut t Transformer) collect_interface_boxed_types_range(start int, end int) {
 	limit := if end < t.a.nodes.len { end } else { t.a.nodes.len }
 	own_cache := isnil(t.box_type_text_cache)
@@ -6223,7 +6223,8 @@ fn (mut t Transformer) refresh_decl_assign_types_after_generic_rewrite(nodes []i
 	// Whether a callee returns a generic application depends on its name alone,
 	// and the same names are called over and over: remember, by the address of
 	// the name, those that do not.
-	mut plain_callee_ptrs := []voidptr{len: 4096}
+	// Null slots are deliberate sentinels, never dereferenced.
+	mut plain_callee_ptrs := []voidptr{len: 4096, init: unsafe { nil }}
 	mut plain_callee_lens := []int{len: 4096}
 	// A later specialization can update a call whose parent was indexed in an
 	// earlier pass; generic_refresh_nodes_for_calls adds that parent here.
@@ -7670,6 +7671,7 @@ fn (mut t Transformer) append_missing_specialized_params_struct_args(mut childre
 	}
 }
 
+@[unsafe]
 fn (mut t Transformer) clear_resolved_call(id flat.NodeId) {
 	if isnil(t.tc) {
 		return
@@ -16893,6 +16895,7 @@ fn (t &Transformer) generic_args_have_placeholders(args_ids []u32) bool {
 	return false
 }
 
+@[direct_array_access]
 fn (t &Transformer) generic_arg_is_unresolved(arg_id u32) bool {
 	if t.skip_generics {
 		// Anonymous literals still need materialization in nongeneric programs.
@@ -16959,8 +16962,13 @@ fn inferred_anonymous_struct_placeholder_id(typ_id u32) bool {
 			return inferred_anonymous_struct_placeholder_id(syntax.raw_base())
 		}
 	}
-	if !shape.has(.dotted) { return clean_id == generic_anonymous_struct_type_id }
-	return flat.source_type_syntax(clean_id).unqualified() == generic_anonymous_struct_type_id
+	if !shape.has(.dotted) {
+		return clean_id in [generic_anonymous_struct_type_id, transform_source_type_union]
+	}
+	return flat.source_type_syntax(clean_id).unqualified() in [
+		generic_anonymous_struct_type_id,
+		transform_source_type_union,
+	]
 }
 
 fn (t &Transformer) generic_arg_is_unresolved_uncached(arg_id u32) bool {
@@ -16968,7 +16976,7 @@ fn (t &Transformer) generic_arg_is_unresolved_uncached(arg_id u32) bool {
 	if clean_id == 0 { return true }
 	syntax := flat.source_type_syntax(clean_id)
 	if syntax.unqualified() in [flat.source_type_unknown, flat.source_type_void,
-		flat.source_type_generic, generic_anonymous_struct_type_id] {
+		flat.source_type_generic, generic_anonymous_struct_type_id, transform_source_type_union] {
 		return true
 	}
 	if syntax.tuple_like() {

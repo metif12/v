@@ -311,7 +311,8 @@ fn builtin_init() {
 				set_stream_unbuffered(C.stderr)
 			}
 		}
-		$if !no_backtrace ? {
+		$if !no_backtrace ?|| windows_tcc_unhandled_filter ? {
+			// Keep executable fault diagnostics when TCC's traces are unavailable.
 			add_unhandled_exception_handler()
 		}
 		// On windows, the default buffering is block based (~4096bytes), which interferes badly with non cmd shells
@@ -363,11 +364,13 @@ fn unhandled_exception_handler(e &ExceptionPointers) C.LONG {
 			return 0
 		}
 		else {
-			eprintln('Unhandled Exception 0x' + ptr_str(e.exception_record.code) + ' at ' +
+			eprintln('Unhandled Exception 0x' + e.exception_record.code.hex() + ' at ' +
 				ptr_str(e.exception_record.address))
 			flush_stdout()
 			flush_stderr()
-			print_backtrace_skipping_top_frames(5)
+			$if !no_backtrace ? {
+				print_backtrace_skipping_top_frames(5)
+			}
 			flush_stdout()
 			flush_stderr()
 		}
@@ -390,6 +393,7 @@ struct C.MEMORY_BASIC_INFORMATION {
 	AllocationBase voidptr
 }
 
+@[unsafe]
 fn C.VirtualQuery(address voidptr, buffer &C.MEMORY_BASIC_INFORMATION, length uint) uint
 
 fn C.GetModuleHandleW(name &u16) voidptr
@@ -429,6 +433,7 @@ const format_message_from_system = 0x00001000
 const format_message_ignore_inserts = 0x00000200
 
 // return an error message generated from WinAPI's `LastError`
+@[unsafe]
 pub fn winapi_lasterr_str() string {
 	err_msg_id := C.GetLastError()
 	if err_msg_id == 8 {

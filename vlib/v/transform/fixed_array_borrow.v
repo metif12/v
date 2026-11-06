@@ -75,6 +75,7 @@ fn (r &BorrowBodyResult) matches_proven_summaries(t &Transformer) bool {
 // Monomorphization starts from the summaries the transform stage computed before lowering and
 // summarises only the declarations appended since; a call into an earlier declaration borrows
 // as its summary says.
+@[unsafe]
 fn (mut t Transformer) prepare_fixed_array_borrow_params() {
 	if isnil(t.tc) {
 		return
@@ -272,6 +273,7 @@ fn (mut t Transformer) begin_borrow_param_mentions(c BorrowCandidate, node &flat
 	}
 }
 
+@[direct_array_access]
 fn (t &Transformer) fixed_array_mentioned_params(id flat.NodeId) u64 {
 	idx := int(id)
 	if idx < 0 || idx >= t.a.nodes.len {
@@ -472,8 +474,9 @@ fn (mut t Transformer) fixed_array_call_uses_borrow(id flat.NodeId, node flat.No
 			offset = if params.len > 0 { t.call_param_offset(name, node, params) } else { 0 }
 		}
 		dependency_start := dependencies.len
+		param_index := t.call_argument_param_index(node, i, offset, params.len, t.call_is_variadic_for_node(name, node))
 		if t.fixed_array_arg_hands_param_storage(arg_id, param)
-			&& t.fixed_array_storage_arg_borrows(name, node, params, i - 1 + offset, arg_id, mut dependencies) {
+			&& t.fixed_array_storage_arg_borrows(name, node, params, param_index, arg_id, mut dependencies) {
 			// A scalar use can already borrow independently of the callee's
 			// summary. Keep that alternative when the storage path is provisional.
 			if dependencies.len > dependency_start {

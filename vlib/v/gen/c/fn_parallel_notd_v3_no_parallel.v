@@ -89,10 +89,12 @@ mut:
 	parsed_strings    int
 	type_metadata_pos int
 	embed_pos         int
+	sizeof_pos        int
 	top_levels_ptr    voidptr
 	strings_ptr       voidptr
 	type_metadata_ptr voidptr
 	embed_ptr         voidptr
+	sizeof_ptr        voidptr
 	// metadata_bits records the count pass's is_type_metadata_node results, one
 	// bit per node, so the fill pass does not classify every node again.
 	metadata_bits_ptr voidptr
@@ -125,6 +127,7 @@ mut:
 	scope      voidptr
 }
 
+@[unsafe]
 fn fn_signature_registration_thread(arg voidptr) voidptr {
 	a := unsafe { &FnSignatureRegistrationArgs(arg) }
 	mut g := unsafe { &FlatGen(a.g) }
@@ -140,6 +143,7 @@ fn fn_signature_registration_thread(arg voidptr) voidptr {
 	return unsafe { nil }
 }
 
+@[unsafe]
 fn flat_cgen_select_thread(arg voidptr) voidptr {
 	mut a := unsafe { &FlatCgenSelectArgs(arg) }
 	a.scope = cgen_worker_scope_begin(true)
@@ -151,6 +155,7 @@ fn flat_cgen_select_thread(arg voidptr) voidptr {
 	return unsafe { nil }
 }
 
+@[unsafe]
 fn collect_gen_info_fn_prep_thread(arg voidptr) voidptr {
 	a := unsafe { &CollectGenInfoFnPrepArgs(arg) }
 	master := unsafe { &FlatGen(a.g) }
@@ -187,7 +192,7 @@ fn collect_gen_info_fn_prep_thread(arg voidptr) voidptr {
 	return unsafe { nil }
 }
 
-@[direct_array_access]
+@[direct_array_access; unsafe]
 fn collect_gen_info_scan_count_thread(arg voidptr) voidptr {
 	mut a := unsafe { &CollectGenInfoScanArgs(arg) }
 	g := unsafe { &FlatGen(a.g) }
@@ -195,19 +200,21 @@ fn collect_gen_info_scan_count_thread(arg voidptr) voidptr {
 	mut metadata_bits := unsafe { &[]u64(a.metadata_bits_ptr) }
 	mut shared_bits := unsafe { &[]u64(a.shared_bits_ptr) }
 	for node_idx in a.start .. a.end {
-		node := g.a.nodes[node_idx]
-		if is_type_metadata_node(&node, mut a.type_text_cache) {
+		// The scan only reads the AST; borrow the node instead of copying it.
+		node := unsafe { &g.a.nodes[node_idx] }
+		class := cgen_kind_class(node.kind)
+		if is_type_metadata_node_of_class(node, class, mut a.type_text_cache) {
 			a.type_metadata_pos++
 			unsafe {
 				metadata_bits[node_idx >> 6] |= u64(1) << (node_idx & 63)
 			}
-			if shared_scan_node_relevant(g.a, &node) {
+			if shared_scan_node_relevant(g.a, node) {
 				unsafe {
 					shared_bits[node_idx >> 6] |= u64(1) << (node_idx & 63)
 				}
 			}
 		}
-		if node.kind == .string_literal {
+		if class & cgen_kind_class_string_literal != 0 {
 			if node.is_embed_payload() {
 				a.embed_pos++
 			} else {
@@ -217,9 +224,15 @@ fn collect_gen_info_scan_count_thread(arg voidptr) voidptr {
 				}
 			}
 		}
-		if node.kind in [.file, .module_decl, .fn_decl, .c_fn_decl, .struct_decl, .type_decl,
-			.global_decl, .const_decl, .enum_decl, .interface_decl, .import_decl, .directive] {
+		if class & cgen_kind_class_top_level != 0 {
 			a.top_level_pos++
+		}
+		if class & cgen_kind_class_sizeof_ref != 0
+			&& (node.kind == .offsetof_expr || node.children_count == 0) {
+			a.sizeof_pos++
+		}
+		if class & (cgen_kind_class_top_level | cgen_kind_class_metadata) == 0 {
+			continue
 		}
 		match node.kind {
 			.fn_decl {
@@ -251,7 +264,7 @@ fn collect_gen_info_scan_count_thread(arg voidptr) voidptr {
 	return unsafe { nil }
 }
 
-@[direct_array_access]
+@[direct_array_access; unsafe]
 fn collect_gen_info_scan_fill_thread(arg voidptr) voidptr {
 	mut a := unsafe { &CollectGenInfoScanArgs(arg) }
 	g := unsafe { &FlatGen(a.g) }
@@ -259,20 +272,24 @@ fn collect_gen_info_scan_fill_thread(arg voidptr) voidptr {
 	mut literals := unsafe { &[]string(a.strings_ptr) }
 	mut type_metadata := unsafe { &[]i32(a.type_metadata_ptr) }
 	mut embeds := unsafe { &[]i32(a.embed_ptr) }
+	mut sizeofs := unsafe { &[]i32(a.sizeof_ptr) }
 	mut top_level_pos := a.top_level_pos
 	mut string_pos := a.string_pos
 	mut type_metadata_pos := a.type_metadata_pos
 	mut embed_pos := a.embed_pos
+	mut sizeof_pos := a.sizeof_pos
 	metadata_bits := unsafe { &[]u64(a.metadata_bits_ptr) }
 	for node_idx in a.start .. a.end {
-		node := g.a.nodes[node_idx]
 		if unsafe { metadata_bits[node_idx >> 6] } & (u64(1) << (node_idx & 63)) != 0 {
 			unsafe {
 				type_metadata[type_metadata_pos] = node_idx
 			}
 			type_metadata_pos++
 		}
-		if node.kind == .string_literal {
+		// The fill only reads the AST; borrow the node instead of copying it.
+		node := unsafe { &g.a.nodes[node_idx] }
+		class := cgen_kind_class(node.kind)
+		if class & cgen_kind_class_string_literal != 0 {
 			if node.is_embed_payload() {
 				unsafe {
 					embeds[embed_pos] = node_idx
@@ -285,17 +302,24 @@ fn collect_gen_info_scan_fill_thread(arg voidptr) voidptr {
 				string_pos++
 			}
 		}
-		if node.kind in [.file, .module_decl, .fn_decl, .c_fn_decl, .struct_decl, .type_decl,
-			.global_decl, .const_decl, .enum_decl, .interface_decl, .import_decl, .directive] {
+		if class & cgen_kind_class_top_level != 0 {
 			unsafe {
 				top_levels[top_level_pos] = node_idx
 			}
 			top_level_pos++
 		}
+		if class & cgen_kind_class_sizeof_ref != 0
+			&& (node.kind == .offsetof_expr || node.children_count == 0) {
+			unsafe {
+				sizeofs[sizeof_pos] = node_idx
+			}
+			sizeof_pos++
+		}
 	}
 	return unsafe { nil }
 }
 
+@[unsafe]
 fn flat_cgen_cost_thread(arg voidptr) voidptr {
 	mut a := unsafe { &FlatCgenCostArgs(arg) }
 	// Costs are written into the shared item array; the collected refs and
@@ -395,6 +419,7 @@ mut:
 	output string
 }
 
+@[unsafe]
 fn forward_decl_lane_thread(arg voidptr) voidptr {
 	mut a := unsafe { &ForwardDeclLaneArgs(arg) }
 	mut w := unsafe { &FlatGen(a.worker) }
@@ -462,6 +487,7 @@ fn forward_decl_lane_bounds(a &flat.FlatAst, items []FlatFnGenItem) []int {
 	return bounds
 }
 
+@[unsafe]
 fn parallel_type_decls_thread(arg voidptr) voidptr {
 	mut w := unsafe { &FlatGen(arg) }
 	// Body dispatchers fork from the master's checker while this task resolves
@@ -557,6 +583,7 @@ fn parallel_type_decls_thread(arg voidptr) voidptr {
 // fixed_storage_scan_thread runs the fixed-storage-const use scan (a full
 // post-transform AST pass) on a private fork while the master collects the
 // fn work items and pre-seeds the parallel tables.
+@[unsafe]
 fn fixed_storage_scan_thread(arg voidptr) voidptr {
 	mut w := unsafe { &FlatGen(arg) }
 	mut fssw := time.new_stopwatch()
@@ -573,6 +600,7 @@ fn fixed_storage_scan_thread(arg voidptr) voidptr {
 
 // fixed_array_support_thread moves the independent whole-AST fixed-array
 // discovery out of the serial type-declaration task.
+@[unsafe]
 fn fixed_array_support_thread(arg voidptr) voidptr {
 	mut w := unsafe { &FlatGen(arg) }
 	fsw := time.new_stopwatch()
@@ -586,6 +614,7 @@ fn fixed_array_support_thread(arg voidptr) voidptr {
 
 // Declaration signatures and unresolved calls use independent read-only inputs;
 // collect their optional typedefs on separate lanes and join before dispatch.
+@[unsafe]
 fn optional_support_thread(arg voidptr) voidptr {
 	mut w := unsafe { &FlatGen(arg) }
 	osw := time.new_stopwatch()
@@ -603,6 +632,7 @@ struct OptionalSelectionArgs {
 	items  chan []FlatFnGenItem
 }
 
+@[unsafe]
 fn checker_signature_support_thread(arg voidptr) voidptr {
 	mut w := unsafe { &FlatGen(arg) }
 	scope := cgen_worker_scope_begin(w.scope_parallel_workers)
@@ -614,6 +644,7 @@ fn checker_signature_support_thread(arg voidptr) voidptr {
 
 // Start declaration discovery while the master selects functions. The channel
 // publishes a stable snapshot before this lane reads the selected signatures.
+@[unsafe]
 fn optional_support_selection_thread(arg voidptr) voidptr {
 	a := unsafe { &OptionalSelectionArgs(arg) }
 	mut w := unsafe { &FlatGen(a.worker) }
@@ -674,6 +705,7 @@ mut:
 	keys []FlatFnGenItemSortKey
 }
 
+@[unsafe]
 fn fn_gen_item_key_sort_thread(arg voidptr) voidptr {
 	mut a := unsafe { &FnGenItemKeySortArgs(arg) }
 	a.keys.sort(a.c_name < b.c_name)
@@ -778,6 +810,7 @@ mut:
 	type_names  &TypeNameShortIndex   = unsafe { nil }
 }
 
+@[unsafe]
 fn type_index_thread(arg voidptr) voidptr {
 	mut a := unsafe { &TypeIndexArgs(arg) }
 	a.scope = cgen_worker_scope_begin(true)
@@ -801,6 +834,7 @@ fn (mut g FlatGen) start_type_indexes(no_parallel bool) (&TypeIndexArgs, []threa
 	return args, threads
 }
 
+@[unsafe]
 fn (mut g FlatGen) finish_type_indexes(args &TypeIndexArgs, threads []thread voidptr) {
 	if threads.len == 0 {
 		return
@@ -823,6 +857,7 @@ mut:
 	param_types_by_short map[string][]types.Type
 }
 
+@[unsafe]
 fn param_type_index_thread(arg voidptr) voidptr {
 	mut a := unsafe { &ParamTypeIndexArgs(arg) }
 	a.scope = cgen_worker_scope_begin(true)
@@ -831,6 +866,7 @@ fn param_type_index_thread(arg voidptr) voidptr {
 	return unsafe { nil }
 }
 
+@[unsafe]
 fn unresolved_call_optional_thread(arg voidptr) voidptr {
 	mut w := unsafe { &FlatGen(arg) }
 	usw := time.new_stopwatch()
@@ -852,6 +888,7 @@ mut:
 	found []i32
 }
 
+@[unsafe]
 fn interface_boxing_scan_thread(arg voidptr) voidptr {
 	mut a := unsafe { &InterfaceBoxingScanArgs(arg) }
 	a.found = interface_boxing_candidates_in(a.a, a.ids, a.start, a.end)
@@ -908,6 +945,7 @@ fn interface_impl_scan_thread(arg voidptr) voidptr {
 	return arg
 }
 
+@[unsafe]
 fn fixed_array_ret_wrappers_thread(arg voidptr) voidptr {
 	mut w := unsafe { &FlatGen(arg) }
 	scope := cgen_worker_scope_begin(w.scope_parallel_workers)
@@ -917,6 +955,7 @@ fn fixed_array_ret_wrappers_thread(arg voidptr) voidptr {
 	return unsafe { nil }
 }
 
+@[unsafe]
 fn cgen_support_precompute_thread(arg voidptr) voidptr {
 	mut w := unsafe { &FlatGen(arg) }
 	scope := cgen_worker_scope_begin(w.scope_parallel_workers)
@@ -927,6 +966,7 @@ fn cgen_support_precompute_thread(arg voidptr) voidptr {
 	return unsafe { nil }
 }
 
+@[unsafe]
 fn pre_dispatch_master_thread(arg voidptr) voidptr {
 	mut g := unsafe { &FlatGen(arg) }
 	g.prepare_pre_dispatch_master()
@@ -934,6 +974,7 @@ fn pre_dispatch_master_thread(arg voidptr) voidptr {
 }
 
 // flat_cgen_chunk_thread supports flat cgen chunk thread handling for c.
+@[unsafe]
 fn flat_cgen_chunk_thread(arg voidptr) voidptr {
 	a := unsafe { &FlatCgenChunkArgs(arg) }
 	mut w := unsafe { &FlatGen(a.worker) }
@@ -950,6 +991,7 @@ fn flat_cgen_chunk_thread(arg voidptr) voidptr {
 	return unsafe { nil }
 }
 
+@[unsafe]
 fn flat_cgen_dynamic_thread(arg voidptr) voidptr {
 	mut a := unsafe { &FlatCgenDynamicArgs(arg) }
 	mut w := unsafe { &FlatGen(a.worker) }
@@ -958,6 +1000,7 @@ fn flat_cgen_dynamic_thread(arg voidptr) voidptr {
 	return unsafe { nil }
 }
 
+@[unsafe]
 fn (mut g FlatGen) collect_fn_gen_candidates_parallel(direct_array_access_fns DirectArrayAccessFns, ignore_overflow_fns DirectArrayAccessFns, program_modules map[string]bool) []FlatFnGenCandidate {
 	nodes := g.top_level_nodes()
 	if isnil(g.a.worker_pool) || g.a.worker_pool.size() == 0 || nodes.len < 2048 {
@@ -1072,6 +1115,7 @@ fn (mut g FlatGen) scan_collect_gen_info(no_parallel bool) CollectGenInfoScanCou
 	mut parsed_string_count := 0
 	mut type_metadata_count := 0
 	mut embed_count := 0
+	mut sizeof_count := 0
 	for mut arg in args {
 		counts.fn_count += arg.counts.fn_count
 		counts.struct_count += arg.counts.struct_count
@@ -1084,26 +1128,31 @@ fn (mut g FlatGen) scan_collect_gen_info(no_parallel bool) CollectGenInfoScanCou
 		counted_strings := arg.string_pos
 		counted_type_metadata := arg.type_metadata_pos
 		counted_embeds := arg.embed_pos
+		counted_sizeofs := arg.sizeof_pos
 		arg.top_level_pos = top_level_count
 		arg.string_pos = string_count
 		arg.type_metadata_pos = type_metadata_count
 		arg.embed_pos = embed_count
+		arg.sizeof_pos = sizeof_count
 		top_level_count += counted_top_levels
 		string_count += counted_strings
 		parsed_string_count += arg.parsed_strings
 		type_metadata_count += counted_type_metadata
 		embed_count += counted_embeds
+		sizeof_count += counted_sizeofs
 	}
 	g.top_level_node_ids = []i32{len: top_level_count}
 	g.ast_string_literals = []string{len: string_count}
 	g.ast_string_literals_parsed = parsed_string_count
 	g.type_metadata_node_ids = []i32{len: type_metadata_count}
 	g.embed_payload_node_ids = []i32{len: embed_count}
+	g.sizeof_offsetof_node_ids = []i32{len: sizeof_count}
 	for mut arg in args {
 		arg.top_levels_ptr = unsafe { voidptr(&g.top_level_node_ids) }
 		arg.strings_ptr = unsafe { voidptr(&g.ast_string_literals) }
 		arg.type_metadata_ptr = unsafe { voidptr(&g.type_metadata_node_ids) }
 		arg.embed_ptr = unsafe { voidptr(&g.embed_payload_node_ids) }
+		arg.sizeof_ptr = unsafe { voidptr(&g.sizeof_offsetof_node_ids) }
 	}
 	tasks.clear()
 	for job in 0 .. n_jobs {
@@ -1117,6 +1166,7 @@ fn (mut g FlatGen) scan_collect_gen_info(no_parallel bool) CollectGenInfoScanCou
 	unsafe { metadata_bits.free() }
 	g.type_metadata_nodes_ready = true
 	g.embed_payload_nodes_ready = true
+	g.sizeof_offsetof_nodes_ready = true
 	g.shared_scan_bits_ready = true
 	return counts
 }
@@ -1218,6 +1268,7 @@ fn (mut g FlatGen) start_fixed_array_ret_wrappers() ([]&FlatGen, []thread voidpt
 	return [worker, support_worker], threads
 }
 
+@[unsafe]
 fn (mut g FlatGen) finish_fixed_array_ret_wrappers(mut wrapper_workers []&FlatGen, threads []thread voidptr) {
 	for t in threads {
 		_ = t.wait()
@@ -1336,6 +1387,7 @@ fn (mut g FlatGen) finish_pending_item_prep_serial() {
 	}
 }
 
+@[unsafe]
 fn (mut g FlatGen) refine_fn_item_costs(no_parallel bool, reserve_worker bool) {
 	if no_parallel || g.fn_gen_items.len < min_flat_cgen_parallel_items {
 		g.finish_pending_item_prep_serial()
@@ -1703,6 +1755,7 @@ fn (mut g FlatGen) write_scoped_cgen_batch_output(batch &FlatGen) bool {
 
 // cgen_publish_builder_text copies a helper builder's text into the arena that
 // encloses `scope` and releases the builder's scoped storage.
+@[unsafe]
 fn cgen_publish_builder_text(mut sb strings.Builder, scope voidptr) string {
 	$if prealloc {
 		if scope != unsafe { nil } {
@@ -1945,6 +1998,7 @@ fn (mut g FlatGen) gen_fn_items_scoped_batches(items []FlatFnGenItem) {
 	cgen_worker_scope_leave(result_scope)
 }
 
+@[unsafe]
 fn (mut g FlatGen) gen_fn_chunks_scoped_dynamic(
 	chunks [][]FlatFnGenItem,
 	chunk_queue chan int,
@@ -2012,6 +2066,7 @@ fn (mut g FlatGen) absorb_dispatch_chunk(batch &FlatGen, chunk_idx int) {
 // gen_fn_items_scoped_master_batches publishes each caller-thread batch
 // directly into the already-scoped master generator, so its temporary caches
 // do not remain resident for the rest of cgen.
+@[unsafe]
 fn (mut g FlatGen) gen_fn_items_scoped_master_batches(items []FlatFnGenItem) {
 	mut total_cost := i64(items.len)
 	for item in items {
@@ -2064,6 +2119,7 @@ fn clone_embedded_fields_by_type(values map[u32][]types.StructField) map[u32][]t
 	return cloned
 }
 
+@[unsafe]
 fn (mut g FlatGen) publish_fixed_storage_scan(mut fs_worker FlatGen) {
 	for opt_name, val_type_id in fs_worker.needed_optional_types.ids {
 		g.needed_optional_types.set_id(opt_name.clone(), val_type_id)
@@ -2117,6 +2173,7 @@ fn clone_cgen_fixed_array_typedef_map(values map[string]FixedArrayTypedefInfo) m
 	return cloned
 }
 
+@[unsafe]
 fn (mut g FlatGen) publish_fixed_array_support(mut worker FlatGen) {
 	g.fixed_array_typedefs_ready = worker.fixed_array_typedefs_ready
 	if worker.worker_scope != unsafe { nil } {
@@ -2130,6 +2187,7 @@ fn (mut g FlatGen) publish_fixed_array_support(mut worker FlatGen) {
 	g.fixed_array_typedefs_needed = worker.fixed_array_typedefs_needed.move()
 }
 
+@[unsafe]
 fn (mut g FlatGen) publish_optional_support(mut worker FlatGen) {
 	g.optional_types_ready = worker.optional_types_ready
 	g.multi_return_types_ready = worker.multi_return_types_ready
@@ -2154,6 +2212,7 @@ fn (mut g FlatGen) publish_optional_support(mut worker FlatGen) {
 	g.multi_return_type_names = worker.multi_return_type_names.move()
 }
 
+@[unsafe]
 fn (mut g FlatGen) publish_unresolved_call_optional_types(mut worker FlatGen) {
 	for name, payload_id in worker.needed_optional_types.ids {
 		// This scan follows declarations in the serial pipeline, including when
@@ -2168,6 +2227,7 @@ fn (mut g FlatGen) publish_unresolved_call_optional_types(mut worker FlatGen) {
 	worker.worker_scope = unsafe { nil }
 }
 
+@[unsafe]
 fn (mut g FlatGen) publish_interface_impl_scan(mut worker FlatGen) {
 	for name, methods in worker.interfaces {
 		if name !in g.interfaces {
@@ -2201,6 +2261,7 @@ fn clone_cgen_source_type_list_map(values map[u32][]u32) map[u32][]u32 {
 }
 
 // gen_fns_dispatch emits fns dispatch output for c.
+@[unsafe]
 fn (mut g FlatGen) gen_fns_dispatch(no_parallel bool) {
 	g.gen_test_failure_global()
 	if no_parallel {
@@ -2693,10 +2754,19 @@ fn (mut g FlatGen) fn_item_cost_and_prep(node_id flat.NodeId, mut stack []flat.N
 		g.preintern_ast_string_literals()
 	}
 	mut cost := 0
-	stack.clear()
-	stack << node_id
-	for stack.len > 0 {
-		current_id := stack.pop()
+	// `stack` is a reusable buffer: `top` is the live depth, entries below the
+	// array length are overwritten in place and only a deeper tree appends, so no
+	// per-node push/pop bookkeeping runs. The visiting order is unchanged.
+	mut top := 0
+	if stack.len == 0 {
+		stack << node_id
+	} else {
+		stack[0] = node_id
+	}
+	top = 1
+	for top > 0 {
+		top--
+		current_id := stack[top]
 		idx := int(current_id)
 		if idx < 0 || idx >= g.a.nodes.len {
 			continue
@@ -2714,15 +2784,21 @@ fn (mut g FlatGen) fn_item_cost_and_prep(node_id flat.NodeId, mut stack []flat.N
 		if expr_type := g.parallel_cached_expr_type(current_id, node) {
 			// Checker-cached expression types repeat the same ~1K canonical
 			// values across hundreds of thousands of nodes; traverse each
-			// distinct value once instead of per node.
-			if g.preseed_type_first_seen(expr_type) {
+			// distinct value once instead of per node, and only values that can
+			// hold a fn type, the only ones preseed_parallel_fn_ptr_type registers.
+			if type_may_hold_fn_type(expr_type) && g.preseed_type_first_seen(expr_type) {
 				g.preseed_parallel_fn_ptr_type(expr_type)
 			}
 		}
 		for i := node.children_count - 1; i >= 0; i-- {
 			child_id := g.a.children[node.children_start + i]
 			if int(child_id) >= 0 {
-				stack << child_id
+				if top < stack.len {
+					stack[top] = child_id
+				} else {
+					stack << child_id
+				}
+				top++
 			}
 		}
 	}
@@ -2731,10 +2807,19 @@ fn (mut g FlatGen) fn_item_cost_and_prep(node_id flat.NodeId, mut stack []flat.N
 
 fn (mut g FlatGen) fn_item_cost_and_c_extern_prep(node_id flat.NodeId, mut stack []flat.NodeId) int {
 	mut cost := 0
-	stack.clear()
-	stack << node_id
-	for stack.len > 0 {
-		current_id := stack.pop()
+	// `stack` is a reusable buffer: `top` is the live depth, entries below the
+	// array length are overwritten in place and only a deeper tree appends, so no
+	// per-node push/pop bookkeeping runs. The visiting order is unchanged.
+	mut top := 0
+	if stack.len == 0 {
+		stack << node_id
+	} else {
+		stack[0] = node_id
+	}
+	top = 1
+	for top > 0 {
+		top--
+		current_id := stack[top]
 		idx := int(current_id)
 		if idx < 0 || idx >= g.a.nodes.len {
 			continue
@@ -2747,7 +2832,12 @@ fn (mut g FlatGen) fn_item_cost_and_c_extern_prep(node_id flat.NodeId, mut stack
 		for i := node.children_count - 1; i >= 0; i-- {
 			child_id := g.a.children[node.children_start + i]
 			if int(child_id) >= 0 {
-				stack << child_id
+				if top < stack.len {
+					stack[top] = child_id
+				} else {
+					stack << child_id
+				}
+				top++
 			}
 		}
 	}
@@ -2783,10 +2873,17 @@ fn (mut g FlatGen) prepare_parallel_items(items []FlatFnGenItem) {
 
 // prepare_parallel_node supports prepare parallel node handling for FlatGen.
 fn (mut g FlatGen) prepare_parallel_node(id flat.NodeId, mut stack []flat.NodeId, mut type_text_cache map[u32]bool) {
-	stack.clear()
-	stack << id
-	for stack.len > 0 {
-		current_id := stack.pop()
+	// Same reusable-buffer walk as exact_flat_fn_gen_item_cost_and_prep.
+	mut top := 0
+	if stack.len == 0 {
+		stack << id
+	} else {
+		stack[0] = id
+	}
+	top = 1
+	for top > 0 {
+		top--
+		current_id := stack[top]
 		idx := int(current_id)
 		if idx < 0 || idx >= g.a.nodes.len {
 			continue
@@ -2806,7 +2903,12 @@ fn (mut g FlatGen) prepare_parallel_node(id flat.NodeId, mut stack []flat.NodeId
 		for i := node.children_count - 1; i >= 0; i-- {
 			child_id := g.a.children[node.children_start + i]
 			if int(child_id) >= 0 {
-				stack << child_id
+				if top < stack.len {
+					stack[top] = child_id
+				} else {
+					stack << child_id
+				}
+				top++
 			}
 		}
 	}
@@ -2825,7 +2927,7 @@ fn (g &FlatGen) parallel_cached_expr_type(id flat.NodeId, node &flat.Node) ?type
 			return t
 		}
 		if node.kind == .call {
-			if name := g.tc.sparse_resolved_call_names[idx] {
+			if name := g.resolved_call_name(id) {
 				if t := g.tc.fn_ret_types[name] {
 					return t
 				}
@@ -2876,10 +2978,19 @@ fn exact_flat_fn_gen_item_cost_and_prep(g &FlatGen, node_id flat.NodeId, item_id
 	a := g.a
 	mut cost := 0
 	mut needs_prelude_scan := false
-	stack.clear()
-	stack << node_id
-	for stack.len > 0 {
-		id := stack.pop()
+	// `stack` is a reusable buffer: `top` is the live depth, entries below the
+	// array length are overwritten in place and only a deeper tree appends, so no
+	// per-node push/pop bookkeeping runs. The visiting order is unchanged.
+	mut top := 0
+	if stack.len == 0 {
+		stack << node_id
+	} else {
+		stack[0] = node_id
+	}
+	top = 1
+	for top > 0 {
+		top--
+		id := stack[top]
 		idx := int(id)
 		if idx < 0 || idx >= a.nodes.len {
 			continue
@@ -2916,7 +3027,9 @@ fn exact_flat_fn_gen_item_cost_and_prep(g &FlatGen, node_id flat.NodeId, item_id
 			}
 		}
 		if expr_type := g.parallel_cached_expr_type_with_cache(id, node, mut resolved_call_cache) {
-			if type_seen.insert(expr_type) {
+			// preseed_parallel_fn_ptr_type registers nothing for a value without a
+			// nested fn type, which is most checked expression types; skip hashing them.
+			if type_may_hold_fn_type(expr_type) && type_seen.insert(expr_type) {
 				cands << FlatCgenPrepCandidate{
 					is_expr:  true
 					typ:      expr_type
@@ -2927,7 +3040,12 @@ fn exact_flat_fn_gen_item_cost_and_prep(g &FlatGen, node_id flat.NodeId, item_id
 		for i := node.children_count - 1; i >= 0; i-- {
 			child_id := a.children[node.children_start + i]
 			if int(child_id) >= 0 {
-				stack << child_id
+				if top < stack.len {
+					stack[top] = child_id
+				} else {
+					stack << child_id
+				}
+				top++
 			}
 		}
 	}
@@ -2940,17 +3058,30 @@ fn (g &FlatGen) parallel_cached_expr_type_with_cache(id flat.NodeId, node &flat.
 	if idx < 0 {
 		return none
 	}
+	mut name := ''
 	if g.tc.parallel_check_sparse && (idx < g.tc.check_range_lo || idx > g.tc.check_range_hi) {
-		return g.parallel_cached_expr_type(id, node)
+		// Same answer as parallel_cached_expr_type; the call's declared return
+		// type goes through the name-keyed cache below like a parsed call's.
+		if g.tc.sparse_expr_type_values.len != 0 {
+			if t := g.tc.sparse_expr_type_values[idx] {
+				return t
+			}
+		}
+		if node.kind != .call {
+			return none
+		}
+		name = g.resolved_call_name(id) or { return none }
+	} else {
+		if idx < g.tc.expr_type_set.len && idx < g.tc.expr_type_values.len
+			&& g.tc.expr_type_set[idx] {
+			return *g.tc.expr_type_values[idx]
+		}
+		if node.kind != .call || idx >= g.tc.resolved_call_set.len
+			|| idx >= g.tc.resolved_call_names.len || !g.tc.resolved_call_set[idx] {
+			return none
+		}
+		name = g.tc.resolved_call_names[idx].value
 	}
-	if idx < g.tc.expr_type_set.len && idx < g.tc.expr_type_values.len && g.tc.expr_type_set[idx] {
-		return *g.tc.expr_type_values[idx]
-	}
-	if node.kind != .call || idx >= g.tc.resolved_call_set.len
-		|| idx >= g.tc.resolved_call_names.len || !g.tc.resolved_call_set[idx] {
-		return none
-	}
-	name := g.tc.resolved_call_names[idx].value
 	slot := int((u64(voidptr(name.str)) >> 4 ^ u64(name.len)) & 4095)
 	if cache.seen[slot] && cache.ptrs[slot] == voidptr(name.str) && cache.lens[slot] == name.len {
 		if cache.found[slot] {
@@ -3053,6 +3184,35 @@ fn (g &FlatGen) parallel_base_type_text(typ_id u32) u32 {
 }
 
 // preseed_parallel_fn_ptr_type supports preseed parallel fn ptr type handling for FlatGen.
+// type_may_hold_fn_type reports whether preseed_parallel_fn_ptr_type can reach a
+// fn type inside `typ`; it mirrors that walk without registering anything.
+fn type_may_hold_fn_type(typ types.Type) bool {
+	if typ is types.FnType {
+		return true
+	} else if typ is types.Pointer {
+		return type_may_hold_fn_type(typ.base_type)
+	} else if typ is types.Array {
+		return type_may_hold_fn_type(typ.elem_type)
+	} else if typ is types.ArrayFixed {
+		return type_may_hold_fn_type(typ.elem_type)
+	} else if typ is types.Map {
+		return type_may_hold_fn_type(typ.key_type) || type_may_hold_fn_type(typ.value_type)
+	} else if typ is types.OptionType {
+		return type_may_hold_fn_type(typ.base_type)
+	} else if typ is types.ResultType {
+		return type_may_hold_fn_type(typ.base_type)
+	} else if typ is types.Alias {
+		return type_may_hold_fn_type(typ.base_type)
+	} else if typ is types.MultiReturn {
+		for item in typ.types {
+			if type_may_hold_fn_type(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 fn (mut g FlatGen) preseed_parallel_fn_ptr_type(typ types.Type) {
 	if typ is types.FnType {
 		g.register_fn_ptr_type(g.fn_ptr_type_key(typ))
@@ -3232,6 +3392,13 @@ fn (g &FlatGen) new_parallel_worker_config(worker_id int, result_only bool) &Fla
 		top_level_node_ids:                 g.top_level_node_ids
 		type_metadata_node_ids:             g.type_metadata_node_ids
 		type_metadata_nodes_ready:          g.type_metadata_nodes_ready
+		main_type_aliases_absent:           g.main_type_aliases_absent
+		sparse_call_name_index:             g.sparse_call_name_index
+		sparse_call_name_values:            g.sparse_call_name_values
+		sparse_call_name_index_base:        g.sparse_call_name_index_base
+		sparse_call_name_index_ready:       g.sparse_call_name_index_ready
+		sizeof_offsetof_node_ids:           g.sizeof_offsetof_node_ids
+		sizeof_offsetof_nodes_ready:        g.sizeof_offsetof_nodes_ready
 		embed_payload_node_ids:             g.embed_payload_node_ids
 		embed_payload_nodes_ready:          g.embed_payload_nodes_ready
 		test_files:                         if result_only {
@@ -3364,6 +3531,7 @@ fn (g &FlatGen) new_parallel_worker_config(worker_id int, result_only bool) &Fla
 		fn_decl_mut_receivers:              g.fn_decl_mut_receivers
 		specialized_method_c_names:         g.specialized_method_c_names
 		fn_decl_ret_types:                  g.fn_decl_ret_types
+		fn_decl_nodes_by_name:              g.fn_decl_nodes_by_name
 		non_generic_fn_names_by_module:     g.non_generic_fn_names_by_module
 		generic_fn_keys_by_short:           g.generic_fn_keys_by_short
 		generic_fn_keys_by_cname:           g.generic_fn_keys_by_cname
@@ -3428,6 +3596,7 @@ fn (g &FlatGen) new_parallel_worker_config(worker_id int, result_only bool) &Fla
 			g.cur_param_types.clone()
 		}
 		cur_param_name_bits:                g.cur_param_name_bits
+		cur_mut_param_name_bits:            g.cur_mut_param_name_bits
 		cur_concrete_optional_params:       if result_only {
 			g.cur_concrete_optional_params
 		} else {
@@ -3534,9 +3703,11 @@ fn (g &FlatGen) new_parallel_worker_config(worker_id int, result_only bool) &Fla
 		local_global_shadow_facts:          &ContextNameFactCache{}
 		local_global_suffix_names:          g.local_global_suffix_names
 		local_global_suffix_names_ready:    g.local_global_suffix_names_ready
+		local_global_suffix_len_bits:       g.local_global_suffix_len_bits
 		local_name_exceptions:              g.local_name_exceptions
 		c_typedef_shadow_names:             g.c_typedef_shadow_names
 		c_typedef_shadow_names_ready:       g.c_typedef_shadow_names_ready
+		c_typedef_shadow_len_bits:          g.c_typedef_shadow_len_bits
 		generic_app_cache:                  &GenericAppCache{
 			base: if !isnil(g.generic_app_cache.base) {
 				g.generic_app_cache.base
@@ -3817,6 +3988,7 @@ fn (mut g FlatGen) merge_parallel_worker_ordered(w &FlatGen, mut ordered []strin
 	g.merge_parallel_worker_into(w, mut ordered, mut ordered_wrapper_defs)
 }
 
+@[unsafe]
 fn (mut g FlatGen) merge_parallel_worker_into(w &FlatGen, mut ordered []string, mut ordered_wrapper_defs []ParallelChunkWrapperDefs) {
 	mut ww := unsafe { w }
 	if w.callback_identity_used {
@@ -3997,6 +4169,7 @@ fn retain_cgen_result_scopes() bool {
 // finish_parallel_worker_scope either releases a joined result arena
 // immediately (oracle fallback) or retains it until FlatGen has written every
 // borrowed function segment.
+@[unsafe]
 fn (mut g FlatGen) finish_parallel_worker_scope(mut w FlatGen) {
 	if w.worker_scope == unsafe { nil } {
 		return
@@ -4025,6 +4198,7 @@ fn (mut g FlatGen) replay_ordered_parallel_wrapper_defs(wrapper_defs []ParallelC
 // the fn work items and pre-seeds the string/fn-ptr tables the workers need.
 // Returns false when the parallel path is not applicable (the caller then
 // runs the serial order).
+@[unsafe]
 fn (mut g FlatGen) run_pre_dispatch_parallel(no_parallel bool) bool {
 	if no_parallel {
 		return false

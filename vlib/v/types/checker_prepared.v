@@ -63,6 +63,7 @@ mut:
 // prepare_collect collects `a`, the code parsed so far, and keeps what
 // collect_continue needs to collect the code parsed after it. False when the
 // prepared code has diagnostics of its own: a check reports those in order.
+@[unsafe]
 pub fn (mut tc TypeChecker) prepare_collect(a &flat.FlatAst) bool {
 	mut prepared := &PreparedCollect{}
 	tc.prepared_collect = prepared
@@ -289,6 +290,7 @@ pub fn (mut tc TypeChecker) collect_continue(a &flat.FlatAst) bool {
 	tc.static_associated_signature_count = -1
 	tc.has_spawn_expr = -1
 	tc.direct_dependencies_by_fn = map[int][]SymbolId{}
+	tc.last_dependency_fn = -1
 	tc.cur_scope = tc.file_scope
 	tc.scope_pool_index = 0
 	tc.extend_collect_node_caches(n)
@@ -383,7 +385,7 @@ fn (mut tc TypeChecker) extend_direct_parent_index(a &flat.FlatAst, start int) {
 	chunk := tc.fill_direct_parent_edges_range(a, start, a.nodes.len)
 	tc.merge_direct_parent_chunk(chunk)
 	for idx in chunk.metadata_node_ids {
-		tc.collect_direct_parent_node_metadata(a, idx, a.nodes[idx])
+		tc.collect_direct_parent_node_metadata(a, idx, a.node(flat.NodeId(idx)))
 	}
 	tc.preflight_index_nodes_len = a.nodes.len
 	tc.direct_parent_index_trusted = true

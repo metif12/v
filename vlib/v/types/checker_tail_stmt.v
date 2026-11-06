@@ -837,8 +837,35 @@ fn (mut tc TypeChecker) check_branch_node(id flat.NodeId, value_tail bool) {
 	}
 }
 
+fn (mut tc TypeChecker) record_preflight_option_layer(id flat.NodeId, condition flat.NodeId, bindings []LocalBinding) {
+	mut keys := []string{}
+	for binding in bindings {
+		target := unalias_type(binding.typ)
+		if target !is OptionType
+			|| !tc.condition_refines_type_of_key(condition, binding.name, 0) {
+			continue
+		}
+		previous := tc.smartcasts[binding.name] or {
+			tc.cur_scope.lookup(binding.name) or { builtin_void_type }
+		}
+		// Rechecking the same optional variant preserves its earlier none guard.
+		if unalias_type(previous).source_type_id() != target.source_type_id() {
+			keys << binding.name
+		}
+	}
+	tc.fn_context.preflight_option_layers[id] = PreflightOptionLayer{ keys: keys }
+}
+
 fn (mut tc TypeChecker) apply_post_if_exit_smartcasts(id flat.NodeId) {
-	for binding in tc.post_if_exit_smartcasts(id) {
+	bindings := tc.post_if_exit_smartcasts(id)
+	if tc.comptime_static_depth > 0 && tc.cur_comptime_variant_loop_vars.len > 0
+		&& tc.valid_node_id(id) {
+		node := tc.a.node(id)
+		if node.kind == .if_expr && node.children_count > 0 {
+			tc.record_preflight_option_layer(id, tc.a.child(node, 0), bindings)
+		}
+	}
+	for binding in bindings {
 		if valid_string_data(binding.name) {
 			tc.smartcasts[binding.name] = binding.typ
 		}
@@ -859,7 +886,11 @@ fn (mut tc TypeChecker) apply_post_assert_smartcasts(id flat.NodeId) {
 		&& tc.option_none_cmp_binding(condition) != none {
 		return
 	}
-	for binding in tc.extract_smartcasts(condition_id) {
+	bindings := tc.extract_smartcasts(condition_id)
+	if tc.comptime_static_depth > 0 && tc.cur_comptime_variant_loop_vars.len > 0 {
+		tc.record_preflight_option_layer(id, condition_id, bindings)
+	}
+	for binding in bindings {
 		if valid_string_data(binding.name) {
 			tc.smartcasts[binding.name] = binding.typ
 		}
@@ -871,6 +902,55 @@ fn (mut tc TypeChecker) apply_post_assert_smartcasts(id flat.NodeId) {
 // that unwrap to new declarations (`y := key` gets the option's base type), unlike
 // the other fallthrough narrowings (`!is` guards, asserts, `||` conditions).
 fn (tc &TypeChecker) none_guard_fallthrough_unwraps(id flat.NodeId, key string) bool {
+	return tc.none_guard_fallthrough_unwraps_in_layer(id, key, false)
+}
+
+fn (tc &TypeChecker) condition_refines_type_of_key(id flat.NodeId, key string, depth int) bool {
+	if depth > 64 || !tc.valid_node_id(id) {
+		return false
+	}
+	node := tc.a.node(id)
+	if node.kind == .is_expr {
+		return node.children_count > 0 && tc.expr_key_matches(tc.a.child(node, 0), key)
+	}
+	if node.kind in [.paren, .prefix] && node.children_count > 0 {
+		return tc.condition_refines_type_of_key(tc.a.child(node, 0), key, depth + 1)
+	}
+	if node.kind == .infix && node.op in [.logical_and, .logical_or] && node.children_count >= 2 {
+		return tc.condition_refines_type_of_key(tc.a.child(node, 0), key, depth + 1)
+			|| tc.condition_refines_type_of_key(tc.a.child(node, 1), key, depth + 1)
+	}
+	if node.kind == .ident {
+		if owner := tc.visible_binding_storage_key(node.value) {
+			if source := tc.fn_context.bool_condition_exprs[owner] {
+				return tc.condition_refines_type_of_key(source, key, depth + 1)
+			}
+		}
+	}
+	return false
+}
+
+fn (tc &TypeChecker) statement_refines_type_of_key(id flat.NodeId, key string, depth int) bool {
+	if depth > 64 || !tc.valid_node_id(id) {
+		return false
+	}
+	node := tc.a.node(id)
+	layer := tc.fn_context.preflight_option_layers[id]
+	if node.kind in [.for_stmt, .for_in_stmt] {
+		if node.kind == .for_stmt && layer.restores_smartcasts {
+			return false
+		}
+		start := if node.kind == .for_stmt { 3 } else { node.value.int() }
+		for i in start .. node.children_count {
+			if tc.statement_refines_type_of_key(tc.a.child(node, i), key, depth + 1) {
+				return true
+			}
+		}
+	}
+	return key in layer.keys
+}
+
+fn (tc &TypeChecker) none_guard_fallthrough_unwraps_in_layer(id flat.NodeId, key string, stop_at_refinement bool) bool {
 	if key.len == 0 || !valid_string_data(key) {
 		return false
 	}
@@ -897,6 +977,33 @@ fn (tc &TypeChecker) none_guard_fallthrough_unwraps(id flat.NodeId, key string) 
 				}
 				if tc.subtree_assigns_key(sibling_id, key) {
 					return false
+				}
+				if stop_at_refinement && tc.statement_refines_type_of_key(sibling_id, key, 0) {
+					return false
+				}
+			}
+			if stop_at_refinement && parent.kind == .for_stmt && index >= 3
+				&& tc.condition_refines_type_of_key(tc.a.child(parent, 1), key, 0) {
+				return false
+			}
+		}
+		if stop_at_refinement && parent.kind == .if_expr && parent.children_count >= 2
+			&& tc.a.child(parent, 0) != current
+			&& tc.condition_refines_type_of_key(tc.a.child(parent, 0), key, 0) {
+			return false
+		}
+		if stop_at_refinement && parent.kind == .match_stmt && parent.children_count > 0
+			&& tc.a.child(parent, 0) != current
+			&& tc.expr_key_matches(tc.a.child(parent, 0), key) {
+			for i in 1 .. parent.children_count {
+				branch := tc.a.child_node(parent, i)
+				if branch.kind != .match_branch || branch.value == 'else' {
+					continue
+				}
+				for j in 0 .. branch.value.int() {
+					if tc.match_type_pattern(tc.a.child_node(branch, j)) != none {
+						return false
+					}
 				}
 			}
 		}
@@ -4306,6 +4413,13 @@ fn (tc &TypeChecker) option_none_cmp_binding(cond flat.Node) ?LocalBinding {
 		return none
 	}
 	mut opt_type := tc.expr_type(opt_id) or { tc.resolve_type(opt_id) }
+	// A reflected sum guard refines expressions without shadowing their storage binding.
+	// An already-unwrapped refinement must still compare the original optional storage.
+	if refined := tc.smartcasts[key] {
+		if refined is OptionType {
+			opt_type = refined
+		}
+	}
 	opt_node := tc.a.node(opt_id)
 	if opt_node.kind == .selector {
 		if declared := tc.selector_declared_value_type(*opt_node) {
@@ -4601,7 +4715,7 @@ fn (mut tc TypeChecker) check_struct_init(id flat.NodeId, node flat.Node) {
 			tc.check_generic_type_constraints(id, node.pos, generic_base_id, generic_args, TypeParamScope{})
 		}
 	}
-	if init_type_id != checker_tail_source_struct && !is_anonymous_struct_id(init_type_id)
+	if !tc.is_contextual_anonymous_struct_literal(init_type_id)
 		&& (!tc.type_name_known(init_type_id) || (init_syntax.c_qualified()
 			&& !tc.type_symbol_known(init_type_id))) {
 		if init_syntax.trimmed() == init_type_id && init_syntax.bare_generic()
@@ -4648,13 +4762,14 @@ fn (mut tc TypeChecker) check_struct_init(id flat.NodeId, node flat.Node) {
 		return
 	}
 	mut init_type := *tc.parse_type(init_type_id)
-	if is_contextual_anonymous_struct_literal(init_type_id) && tc.expected_expr_id >= 0
+	if tc.is_contextual_anonymous_struct_literal(init_type_id) && tc.expected_expr_id >= 0
 		&& tc.expr_is_value_tail_of(flat.NodeId(tc.expected_expr_id), id) {
 		expected := unalias_type(tc.expected_expr_type)
 		// Only a type the parser itself made up may be adopted here. A user-declared
 		// `AnonStruct_Secret` is an ordinary private type, and adopting it would let a
 		// bare literal stand in for a name the caller is not allowed to write.
-		if expected is Struct && tc.is_synthesized_anon_struct(expected.source_type_id()) {
+		if expected is Struct && tc.is_synthesized_anon_struct(expected.source_type_id())
+			&& (!is_anonymous_union_literal_id(init_type_id) || expected.source_type_id() in tc.unions) {
 			init_type = expected
 			tc.remember_expr_type(id, expected)
 		}
@@ -4712,7 +4827,8 @@ fn (mut tc TypeChecker) check_struct_init(id flat.NodeId, node flat.Node) {
 		// another module. Naming an anonymous declaration outright is a different thing
 		// and stays subject to the check, as does a type a user happened to call
 		// `AnonStruct_...`: neither is a name the parser made up for a literal.
-		if init_type_id != checker_tail_source_struct && !tc.a.contextual_anon_struct_types[init_type_id] {
+		if init_type_id !in [checker_tail_source_struct, checker_source_union]
+			&& !tc.a.contextual_anon_struct_types[init_type_id] {
 			if visibility_type_id := tc.struct_init_private_type_id(init_type, init_struct) {
 				private_name := if visibility_type_id == init_struct.source_type_id() {
 					init_struct.name()
@@ -5295,7 +5411,8 @@ fn (tc &TypeChecker) types_match_ignoring_module_qualification(expected &Type, a
 }
 
 fn (mut tc TypeChecker) check_union_struct_init_fields(id flat.NodeId, node flat.Node, init_name_id u32, supplied_fields map[string]bool) {
-	if init_name_id in tc.unions && tc.initialized_union_field_count(init_name_id, supplied_fields) > 1 {
+	if (init_name_id in tc.unions && tc.initialized_union_field_count(init_name_id, supplied_fields) > 1)
+		|| (init_name_id == checker_source_union && supplied_fields.len > 1) {
 		display := flat.source_type_name(init_name_id).all_after_last('.')
 		tc.record_error_at(.assignment_mismatch, 'union `${display}` can have only one field initialised', id, tc.struct_init_head_pos(node))
 		return
@@ -5842,6 +5959,7 @@ fn (tc &TypeChecker) enum_fields_contain(enum_name_id u32, fields []string, fiel
 
 // retire_check_decl_indexes ends the use of the declaration indexes, also by the
 // forks and views that still point to them, and drops the source text memo.
+@[unsafe]
 fn (mut tc TypeChecker) retire_check_decl_indexes() {
 	mut indexes := tc.check_decl_indexes
 	if !isnil(indexes) {
@@ -5853,7 +5971,7 @@ fn (mut tc TypeChecker) retire_check_decl_indexes() {
 
 // top_level_check_decl_indexes returns the live declaration indexes when they
 // describe the current top-level declaration index, or nil.
-@[inline]
+@[inline; unsafe]
 fn (tc &TypeChecker) top_level_check_decl_indexes() &CheckDeclIndexes {
 	indexes := tc.check_decl_indexes
 	if isnil(indexes) || !indexes.live || indexes.top_level_len != tc.top_level_idx.len
@@ -7214,6 +7332,7 @@ fn (tc &TypeChecker) ident_is_capturing_fn_literal_alias(name string) bool {
 	return tc.capturing_fn_literal_locals[binding_key]
 }
 
+@[unsafe]
 fn (tc &TypeChecker) visible_binding_storage_key(name string) ?string {
 	if tc.cur_scope == unsafe { nil } {
 		return none
@@ -7644,8 +7763,16 @@ fn (mut tc TypeChecker) check_selector(id flat.NodeId, node flat.Node) {
 		return
 	}
 	method_receiver := unalias_and_unwrap_pointer_type(base_type)
-	if method_receiver is Struct && flat.source_type_syntax(method_receiver.source_type_id()).unqualified() == checker_tail_source_struct {
+	if method_receiver is Struct && flat.source_type_syntax(method_receiver.source_type_id()).unqualified() in [
+		checker_tail_source_struct,
+		checker_source_union,
+	] {
 		if field_type := tc.inferred_anonymous_struct_field_type(base_id, node.value) {
+			if flat.source_type_syntax(method_receiver.source_type_id()).unqualified() == checker_source_union
+				&& tc.unsafe_depth == 0 && !tc.expr_is_inside_unsafe_block(id)
+				&& !tc.translated_files[tc.cur_file] && !tc.selector_is_assignment_lhs(id) {
+				tc.record_warning_at(.unknown_field, 'reading a union field (or its address) requires `unsafe`', id, tc.selector_field_diagnostic_pos(id, node.value))
+			}
 			tc.register_synth_type(id, field_type)
 			return
 		}
@@ -7971,6 +8098,10 @@ fn (tc &TypeChecker) ident_is_multi_pattern_match_subject(id flat.NodeId) bool {
 	}
 	ident := tc.a.node(id)
 	if ident.kind != .ident {
+		return false
+	}
+	// The branch found below is a parent in the function's node range.
+	if tc.fn_range_lacks_multi_pattern_match(int(id)) {
 		return false
 	}
 	mut current := id
@@ -9729,6 +9860,7 @@ fn (mut tc TypeChecker) check_ident(id flat.NodeId, node flat.Node) {
 	}
 }
 
+@[unsafe]
 fn (tc &TypeChecker) ident_uses_forbidden_closure_capture(name string) bool {
 	if !tc.fn_context.closure_forbidden_captures[name]
 		|| tc.fn_context.closure_scope == unsafe { nil } {
@@ -9899,6 +10031,7 @@ fn (mut tc TypeChecker) check_defer_result(id flat.NodeId, node flat.Node) {
 	})
 }
 
+@[unsafe]
 fn (tc &TypeChecker) non_file_scope_type(name string) ?Type {
 	owner := tc.cur_scope.lookup_owner(name) or { return none }
 	if owner.belongs_to_scope(tc.file_scope) {
@@ -9910,6 +10043,7 @@ fn (tc &TypeChecker) non_file_scope_type(name string) ?Type {
 	return owner.scope.types[owner.index]
 }
 
+@[unsafe]
 fn (tc &TypeChecker) bare_name_is_const_owned_over_global(name string) bool {
 	if tc.global_name_bloom.excludes(name, u64(tc.global_names.len)) || name.contains('.')
 		|| name !in tc.global_names {
@@ -10106,7 +10240,7 @@ fn (mut tc TypeChecker) resolve_expr(id flat.NodeId, expected Type) Type {
 	// When several anonymous structs share the same field names, or a contextual type is
 	// declared after the literal, the parser may leave or infer the literal too early.
 	// Its call/assignment/return context supplies the exact anonymous struct here.
-	if node.kind == .struct_init && is_contextual_anonymous_struct_literal(node.source_value_id())
+	if node.kind == .struct_init && tc.is_contextual_anonymous_struct_literal(node.source_value_id())
 		&& expected !is Pointer && tc.anonymous_struct_literal_compatible(node, expected) {
 		tc.register_synth_type(id, expected_raw)
 		return expected_raw
@@ -10128,7 +10262,7 @@ fn (mut tc TypeChecker) resolve_expr(id flat.NodeId, expected Type) Type {
 	if node.kind == .prefix && node.op == .amp && node.children_count == 1 && expected is Pointer {
 		child_id := tc.a.child(&node, 0)
 		child := tc.a.nodes[int(child_id)]
-		if child.kind == .struct_init && is_contextual_anonymous_struct_literal(child.source_value_id())
+		if child.kind == .struct_init && tc.is_contextual_anonymous_struct_literal(child.source_value_id())
 			&& tc.anonymous_struct_literal_compatible(child, expected.base_type) {
 			tc.register_synth_type(child_id, expected.base_type)
 			tc.register_synth_type(id, expected_raw)
@@ -10344,7 +10478,13 @@ fn (mut tc TypeChecker) resolve_expr(id flat.NodeId, expected Type) Type {
 			}
 			return actual
 		}
-		if expected is SumType || expected is Enum {
+		if expected is SumType {
+			// The storage context is the sum, but lowering still needs the value's
+			// concrete type to choose its variant and promote numeric match arms.
+			tc.register_synth_type(id, actual)
+			return expected_raw
+		}
+		if expected is Enum {
 			tc.register_synth_type(id, expected_raw)
 			return expected_raw
 		}
@@ -10482,7 +10622,8 @@ fn (tc &TypeChecker) selector_fn_value_key(node flat.Node) ?string {
 	// A namespace is an identifier that names no value. Past that test, few selectors
 	// name a global or a constant: look those up before deciding whether the base is
 	// a namespace, which probes every kind of type and import.
-	if base.kind == .ident && !tc.ident_resolves_to_value(base.value)
+	base_is_value := base.kind == .ident && tc.ident_resolves_to_value(base.value)
+	if base.kind == .ident && !base_is_value
 		&& (tc.global_type_for_selector(node) != none || tc.const_type_for_selector(node) != none)
 		&& tc.is_namespace_selector(node, base) {
 		return none
@@ -10495,7 +10636,7 @@ fn (tc &TypeChecker) selector_fn_value_key(node flat.Node) ?string {
 			}
 			return none
 		}
-		if tc.ident_resolves_to_value(base.value) {
+		if base_is_value {
 			return none
 		}
 		if resolved_mod := tc.resolve_import_alias(base.value) {
@@ -10839,6 +10980,7 @@ fn (tc &TypeChecker) null_constant_expr_text(id flat.NodeId) string {
 // explicit cast `&T(0)` already is. `unsafe { nil }` stays the way to write a null
 // reference. `voidptr` targets, `.c.v` files and translated files are left alone, as
 // they are by the cast rule.
+@[unsafe]
 fn (mut tc TypeChecker) record_null_constant_reference_error(kind TypeErrorKind, expr_id flat.NodeId, expected Type) bool {
 	if tc.unsafe_depth > 0 || unalias_type(expected) !is Pointer {
 		return false
@@ -10856,6 +10998,75 @@ fn (mut tc TypeChecker) record_null_constant_reference_error(kind TypeErrorKind,
 	} else {
 		'cannot use `${text}` as `${call_argument_type_name(expected)}` outside `unsafe`, use `unsafe { nil }`'
 	}
+	tc.record_error_at(kind, msg, expr_id, tc.a.node(expr_id).pos)
+	return true
+}
+
+// unsafe_null_pointer_expr_text reports whether `id` is an `unsafe` block or expression that
+// yields a null pointer (`nil`, `0` or `voidptr(0)`). Anything else yields an empty string.
+fn (tc &TypeChecker) unsafe_null_pointer_expr_text(id flat.NodeId) string {
+	value_id := tc.unwrap_paren_expr_id(id)
+	if !tc.valid_node_id(value_id) {
+		return ''
+	}
+	value := tc.a.node(value_id)
+	if value.kind != .block || value.value != 'unsafe' {
+		return ''
+	}
+	tail_id := tc.branch_tail_expr_id(value_id)
+	if !tc.valid_node_id(tail_id) {
+		return ''
+	}
+	text := tc.null_constant_expr_text(tail_id)
+	if text != '' {
+		return 'unsafe { ' + text + ' }'
+	}
+	nested := tc.unsafe_null_pointer_expr_text(tail_id)
+	if nested != '' {
+		return nested
+	}
+	return ''
+}
+
+fn (tc &TypeChecker) is_unsafe_null_pointer_expr(id flat.NodeId) bool {
+	return tc.unsafe_null_pointer_expr_text(id) != ''
+}
+
+fn (tc &TypeChecker) current_function_is_unsafe() bool {
+	fn_id := flat.NodeId(tc.fn_context.node_id)
+	if !tc.valid_node_id(fn_id) {
+		return false
+	}
+	fn_node := tc.a.node(fn_id)
+	if fn_node.kind != .fn_decl {
+		return false
+	}
+	return fn_node.value in tc.unsafe_fn_modules
+}
+
+// record_unsafe_null_return_error rejects an `unsafe { nil }` (or equivalent) pointer that is
+// returned by a safe (non-`@[unsafe]`) function with a non-optional reference return type.
+// `unsafe { nil }` remains valid inside an `unsafe` block or an `@[unsafe]` function.
+fn (mut tc TypeChecker) record_unsafe_null_return_error(kind TypeErrorKind, expr_id flat.NodeId, expected Type) bool {
+	if tc.unsafe_depth > 0 || tc.expr_is_inside_unsafe_block(expr_id) {
+		return false
+	}
+	if unalias_type(expected) !is Pointer {
+		return false
+	}
+	if fn_param_is_voidptr_type(expected) {
+		return false
+	}
+	if tc.translated_files[tc.cur_file] || tc.cur_file.ends_with('.c.v') {
+		return false
+	}
+	if tc.current_function_is_unsafe() {
+		return false
+	}
+	if !tc.is_unsafe_null_pointer_expr(expr_id) {
+		return false
+	}
+	msg := 'cannot return a null pointer from a safe function; use `?&T` or mark the function `@[unsafe]`'
 	tc.record_error_at(kind, msg, expr_id, tc.a.node(expr_id).pos)
 	return true
 }
@@ -13947,6 +14158,7 @@ fn interface_impl_candidate_name(name_id u32) u32 {
 }
 
 // ierror_impl_names returns source spelling IDs of concrete structs that can be boxed as `IError`.
+@[unsafe]
 pub fn (tc &TypeChecker) ierror_impl_names() []u32 {
 	if tc.type_cache != unsafe { nil } {
 		mut cache := unsafe { tc.type_cache }
@@ -14463,6 +14675,7 @@ fn generic_type_arg_short_for_signature(type_arg_id u32) string {
 }
 
 // named_type_compatible_with_ierror checks a source spelling ID against the IError requirements.
+@[unsafe]
 pub fn (tc &TypeChecker) named_type_compatible_with_ierror(concrete_name_id u32) bool {
 	cache_key := tc.ierror_compat_cache_key(concrete_name_id)
 	if tc.type_cache != unsafe { nil } {
@@ -14739,6 +14952,7 @@ fn (tc &TypeChecker) named_type_has_non_builtin_error_embed(concrete_name_id u32
 	return false
 }
 
+@[unsafe]
 fn (tc &TypeChecker) source_struct_has_non_builtin_error_embed(concrete_name_id u32, file string, mod_name string) bool {
 	if isnil(tc.a) {
 		return false
@@ -15000,9 +15214,31 @@ fn (tc &TypeChecker) source_declares_type_in_scope(name_id u32, file string, mod
 // The module is normalized so that '' and 'main' collapse to the same bucket,
 // matching the old `module_names_match` semantics.
 fn scope_type_key(file string, mod_name string, name_id u32) u64 {
+	return (u64(scope_type_context_id(file, mod_name)) << 32) | u64(name_id)
+}
+
+// scope_type_context_id interns the `file\x01module` context of scope_type_key.
+fn scope_type_context_id(file string, mod_name string) u32 {
 	norm_mod := if mod_name == '' || mod_name == 'main' { 'main' } else { mod_name }
-	context_id := flat.source_type_id('${file}\x01${norm_mod}')
-	return (u64(context_id) << 32) | u64(name_id)
+	return flat.source_type_id('${file}\x01${norm_mod}')
+}
+
+// current_scope_type_key is scope_type_key(tc.cur_file, tc.cur_module, name_id)
+// with the interned context memoized per checker: the declaration checks query
+// it in runs of hundreds per file.
+fn (tc &TypeChecker) current_scope_type_key(name_id u32) u64 {
+	mut cache := tc.qualify_name_cache
+	if isnil(cache) {
+		return scope_type_key(tc.cur_file, tc.cur_module, name_id)
+	}
+	if !cache.scope_key_valid || !same_string(cache.scope_key_file, tc.cur_file)
+		|| !same_string(cache.scope_key_module, tc.cur_module) {
+		cache.scope_key_file = tc.cur_file
+		cache.scope_key_module = tc.cur_module
+		cache.scope_key_context = scope_type_context_id(tc.cur_file, tc.cur_module)
+		cache.scope_key_valid = true
+	}
+	return (u64(cache.scope_key_context) << 32) | u64(name_id)
 }
 
 // scope_unqualified_type_name keeps plain declaration names out of the syntax cache.
@@ -15374,7 +15610,26 @@ pub fn (tc &TypeChecker) begin_interface_impl_queries() bool {
 	return true
 }
 
+// begin_interface_impl_queries_sharing is begin_interface_impl_queries with the
+// method-receiver index of `shared` (see memo_index_method_receivers), which
+// only reads the declared signatures and is read-only once built, in place of
+// indexing every signature key again for this checker.
+fn (tc &TypeChecker) begin_interface_impl_queries_sharing(shared &InterfaceImplMemo) bool {
+	if !isnil(tc.interface_impl_memo) {
+		return false
+	}
+	mut writable := unsafe { tc }
+	writable.interface_impl_memo = &InterfaceImplMemo{
+		method_keys_ready: shared.method_keys_ready
+		required_methods:  shared.required_methods
+		receiver_parts:    shared.receiver_parts
+		method_receivers:  shared.method_receivers
+	}
+	return true
+}
+
 // end_interface_impl_queries closes the memo that begin_interface_impl_queries opened.
+@[unsafe]
 pub fn (tc &TypeChecker) end_interface_impl_queries(opened bool) {
 	if opened {
 		mut writable := unsafe { tc }
@@ -15382,6 +15637,7 @@ pub fn (tc &TypeChecker) end_interface_impl_queries(opened bool) {
 	}
 }
 
+@[unsafe]
 pub fn (mut tc TypeChecker) prepare_interface_query_indexes() {
 	tc.prepare_interface_requirement_indexes()
 	tc.interface_impl_indexes = map[u32]&InterfaceImplIndex{}
@@ -16279,8 +16535,14 @@ fn subst_generic_const_expr(expr string, args []u32, params []u32) string {
 }
 
 fn (tc &TypeChecker) embedded_method_call_info(struct_name_id u32, method string) ?CallInfo {
+	// Most structs embed nothing: no promoted method, and no `seen` set to allocate.
+	receiver_ids := tc.embedded_receiver_ids(struct_name_id)
+	if receiver_ids.len == 0 {
+		return none
+	}
 	mut seen := map[u32]bool{}
-	return tc.embedded_method_call_info_inner(struct_name_id, method, mut seen)
+	seen[struct_name_id] = true
+	return tc.embedded_method_call_info_among(receiver_ids, method, mut seen)
 }
 
 fn (tc &TypeChecker) embedded_method_call_info_inner(struct_name_id u32, method string, mut seen map[u32]bool) ?CallInfo {
@@ -16288,7 +16550,13 @@ fn (tc &TypeChecker) embedded_method_call_info_inner(struct_name_id u32, method 
 		return none
 	}
 	seen[struct_name_id] = true
-	for receiver_id in tc.embedded_receiver_ids(struct_name_id) {
+	return tc.embedded_method_call_info_among(tc.embedded_receiver_ids(struct_name_id), method, mut seen)
+}
+
+// embedded_method_call_info_among resolves `method` promoted through the
+// embedded receivers `receiver_ids` (in field order), then through theirs.
+fn (tc &TypeChecker) embedded_method_call_info_among(receiver_ids []u32, method string, mut seen map[u32]bool) ?CallInfo {
+	for receiver_id in receiver_ids {
 		// An embedded concrete generic receiver (`Collector[int]`) promotes the
 		// method registered on its open declaration (`Collector[T].use`).
 		if info := tc.resolve_generic_struct_method(receiver_id, method) {
@@ -17232,6 +17500,7 @@ fn (tc &TypeChecker) sum_has_variant(sum_name_id u32, variant_name_id u32) bool 
 }
 
 // sum_variant_type_for_pattern resolves a sum pattern using source spelling IDs.
+@[unsafe]
 pub fn (tc &TypeChecker) sum_variant_type_for_pattern(sum_name_id u32, variant_name_id u32) ?u32 {
 	if isnil(tc.type_cache) {
 		return tc.sum_variant_type_for_pattern_depth(sum_name_id, variant_name_id, 0)
@@ -17617,6 +17886,14 @@ fn (tc &TypeChecker) smartcast_type_miss(id flat.NodeId, parsed bool, state u32)
 		return none
 	}
 	if typ := tc.smartcasts[key] {
+		if tc.comptime_static_depth > 0 && tc.cur_comptime_variant_loop_vars.len > 0 {
+			// A reflected option payload must retain lexical none-guard unwrapping.
+			// Writes and later type refinements end the current guard's option layer.
+			concrete := unalias_type(typ)
+			if concrete is OptionType && tc.none_guard_fallthrough_unwraps_in_layer(id, key, true) {
+				return *concrete.base_type
+			}
+		}
 		return typ
 	}
 	if !parsed {
@@ -18054,6 +18331,11 @@ fn (tc &TypeChecker) subtree_ends_narrowing(root flat.NodeId, key string, narrow
 }
 
 fn (tc &TypeChecker) lexical_match_smartcast_type(id flat.NodeId) ?Type {
+	// A match narrowing names its subject among the function's smartcast keys:
+	// an expression none of them names has no key to build and no parents to walk.
+	if tc.lexical_smartcasts_unused(int(id)) {
+		return none
+	}
 	return tc.lexical_smartcast_type_in_parents(id, tc.expr_key(id), true)
 }
 
@@ -18195,7 +18477,7 @@ pub fn type_text_contains_typeof(s string) bool {
 }
 
 // parse_type resolves an interned source spelling in the current checker context.
-@[inline]
+@[inline; unsafe]
 pub fn (tc &TypeChecker) parse_type(source_id u32) &Type {
 	if tc.type_param_texts.len > 0 {
 		if resolved := tc.resolved_inferred_type(source_id) {
@@ -18223,6 +18505,7 @@ pub fn (tc &TypeChecker) parse_type(source_id u32) &Type {
 	return tc.parse_type_miss(source_id)
 }
 
+@[unsafe]
 fn (tc &TypeChecker) parse_type_miss(source_id u32) &Type {
 	if resolved := tc.resolved_inferred_type(source_id) {
 		return tc.parse_type(resolved)
@@ -18256,7 +18539,7 @@ fn (tc &TypeChecker) parse_type_miss(source_id u32) &Type {
 // parse_type_ref resolves a node annotation through its exact canonical text
 // identity. Context remains part of the key because an unqualified spelling
 // can denote different types in different files/modules.
-@[inline]
+@[inline; unsafe]
 pub fn (tc &TypeChecker) parse_type_ref(text_id u32) &Type {
 	if text_id == 0 || !tc.fast_type_text_refs || tc.type_cache == unsafe { nil }
 		|| !tc.type_cache.parse_enabled {
@@ -18305,6 +18588,7 @@ fn (tc &TypeChecker) parse_type_ref_miss(text_id u32) &Type {
 
 // parse_canonical_type_cached is parse_canonical_type memoized per parse
 // context, like parse_type's own cache.
+@[unsafe]
 pub fn (tc &TypeChecker) parse_canonical_type_cached(source_id u32) &Type {
 	if source_id == 0 || !tc.fast_type_text_refs || tc.type_cache == unsafe { nil }
 		|| !tc.type_cache.parse_enabled || tc.type_cache.alias_parse_stack.len > 0 {
@@ -19490,10 +19774,11 @@ fn (tc &TypeChecker) resolved_inferred_type(source_id u32) ?u32 {
 
 // check_node_inferred_type_witnesses checks the `typeof(expr)` expressions of
 // the type a node is annotated with, or of the type spelling in its value.
-fn (mut tc TypeChecker) check_node_inferred_type_witnesses(node flat.Node) {
+fn (mut tc TypeChecker) check_node_inferred_type_witnesses(node &flat.Node) {
 	tc.check_inferred_type_witnesses(node.typ)
 	if node.kind in [.string_literal, .char_literal, .string_interp] { return }
-	if node.value.len > 15 && node.value.contains('typeof(__expr_') {
+	if node.value.len > 15 && node.value.index_u8(`(`) >= 0
+		&& node.value.contains('typeof(__expr_') {
 		// Legacy raw operands cross the source boundary here; ordinary names
 		// should never enter the source type interner for this probe.
 		value_id := node.source_value_id()
@@ -19510,6 +19795,7 @@ fn (mut tc TypeChecker) check_node_inferred_type_witnesses(node flat.Node) {
 // evaluated. Checking a call first also infers its generic arguments, so the
 // witness names the instantiated return type. An expression whose type still
 // names an unresolved generic placeholder is rejected.
+@[unsafe]
 fn (mut tc TypeChecker) check_inferred_type_witnesses(source_id u32) {
 	if !inferred_type_source(source_id) {
 		return
@@ -20291,6 +20577,7 @@ pub fn (tc &TypeChecker) disarm_body_resolve_memo() {
 // inside a disposable stage arena, so the master checker must drop the pointer
 // before that arena is released — later phases would otherwise dereference a
 // freed allocation just to see that the memo is inactive.
+@[unsafe]
 pub fn (tc &TypeChecker) reset_body_resolve_memo() {
 	mut wtc := unsafe { tc }
 	wtc.body_resolve_memo = unsafe { nil }
@@ -20755,6 +21042,12 @@ fn (tc &TypeChecker) resolve_type_nonliteral(id flat.NodeId) Type {
 			if node.kind != .call || cached_type_ref2 !is Void {
 				return *cached_type_ref2
 			}
+		}
+	} else if tc.comptime_static_depth > 0 && kind_id == 7 {
+		// A variant-dependent local can carry an annotation from an earlier
+		// generic check. Its current preflight scope has the narrowed type.
+		if typ := tc.non_file_scope_type(node.value) {
+			return typ
 		}
 	}
 	if node.kind == .selector {
@@ -21262,6 +21555,9 @@ fn (tc &TypeChecker) resolve_type_nonliteral(id flat.NodeId) Type {
 					if ret := tc.fn_ret_types[mname] {
 						return ret
 					}
+					if info := tc.interface_receiver_method_call_info(clean_type.source_type_id(), fn_node.value) {
+						return info.return_type
+					}
 				}
 				if clean_type is SumType {
 					mname := '${clean_type.name()}.${fn_node.value}'
@@ -21627,7 +21923,10 @@ fn (tc &TypeChecker) resolve_type_nonliteral(id flat.NodeId) Type {
 				}
 			}
 			if clean is Struct {
-				if flat.source_type_syntax(clean.source_type_id()).unqualified() == checker_tail_source_struct {
+				if flat.source_type_syntax(clean.source_type_id()).unqualified() in [
+					checker_tail_source_struct,
+					checker_source_union,
+				] {
 					if typ := tc.inferred_anonymous_struct_field_type(tc.a.child(node, 0), node.value) {
 						return typ
 					}
@@ -22198,6 +22497,7 @@ fn (tc &TypeChecker) c_extern_abi_type(t &Type) string {
 }
 
 // c_type returns the C representation of a semantic type.
+@[unsafe]
 pub fn (tc &TypeChecker) c_type(t &Type) string {
 	// These representations are constant or depend only on primitive flags.
 	// Interning a collection recursively walks its element types even though
