@@ -964,6 +964,7 @@ fn (mut g Parser) parse_if() !bool {
 				c_name:                        branch_cast
 				smartcast_origin_type:         smartcast_boxed_type
 				smartcast_origin_is_reference: previous_smartcast.original_is_reference()
+				smartcast_copy_is_boxed:       previous_smartcast.smartcast_origin_type == 0 || previous_smartcast.smartcast_copy_is_boxed
 				smartcast_origin_source:       smartcast_storage
 			})
 		}
@@ -1133,6 +1134,7 @@ fn (mut g Parser) parse_if_multi_return_guard(names []string) !bool {
 	return then_terminates && else_terminates
 }
 
+@[unsafe]
 fn (g &Parser) if_starts_final_block_expression() bool {
 	// Interpolation braces belong to the string, not the condition's branch block.
 	mut lookahead := scanner.new_scanner(g.prefs, .skip_interpolation)

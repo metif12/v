@@ -4,7 +4,9 @@ import io
 import net
 import time
 
-// SSLConn is the current connection
+// SSLConn is a TLS connection. It does not synchronize access to its TLS context.
+// Calls on the same connection must be serialized, including read, write, timeout
+// changes, and close/shutdown. One reader and one writer must not call it concurrently.
 pub struct SSLConn {
 pub:
 	config SSLConnectConfig
@@ -37,6 +39,7 @@ pub:
 }
 
 // new_ssl_conn instance an new SSLCon struct
+@[unsafe]
 pub fn new_ssl_conn(config SSLConnectConfig) !&SSLConn {
 	$if trace_ssl ? {
 		eprintln(@METHOD)
@@ -86,6 +89,7 @@ pub fn (mut s SSLConn) close() ! {
 // negotiated_alpn returns the ALPN protocol selected during the TLS
 // handshake (e.g. 'h2' or 'http/1.1'), or an empty string if no protocol
 // was negotiated.
+@[unsafe]
 pub fn (s &SSLConn) negotiated_alpn() string {
 	mut data := &u8(unsafe { nil })
 	mut length := u32(0)
@@ -98,6 +102,7 @@ pub fn (s &SSLConn) negotiated_alpn() string {
 }
 
 // shutdown closes the ssl connection and does cleanup
+@[unsafe]
 pub fn (mut s SSLConn) shutdown() ! {
 	$if trace_ssl ? {
 		eprintln(@METHOD)
@@ -159,6 +164,7 @@ pub fn (mut s SSLConn) shutdown() ! {
 	}
 }
 
+@[unsafe]
 fn (mut s SSLConn) init() ! {
 	$if trace_ssl ? {
 		eprintln(@METHOD)
@@ -268,6 +274,7 @@ fn (mut s SSLConn) init() ! {
 // timeout via wait_for_read/wait_for_write, and a blocking socket never yields
 // WANT_READ — SSL_read() would sit in read() with no bound at all, ignoring
 // set_read_timeout() (vlang/v#28506).
+@[unsafe]
 pub fn (mut s SSLConn) connect(mut tcp_conn net.TcpConn, hostname string) ! {
 	$if trace_ssl ? {
 		eprintln('${@METHOD} hostname: ${hostname}')
@@ -302,6 +309,7 @@ pub fn (mut s SSLConn) connect(mut tcp_conn net.TcpConn, hostname string) ! {
 	connected = true
 }
 
+@[unsafe]
 fn (s &SSLConn) verify_hostname(hostname string) ! {
 	if !s.config.validate {
 		return
@@ -326,6 +334,7 @@ fn (s &SSLConn) verify_hostname(hostname string) ! {
 }
 
 // dial opens an ssl connection on hostname:port
+@[unsafe]
 pub fn (mut s SSLConn) dial(hostname string, port int) ! {
 	$if trace_ssl ? {
 		eprintln('${@METHOD} hostname: ${hostname} | port: ${port}')
@@ -355,6 +364,7 @@ pub fn (mut s SSLConn) dial(hostname string, port int) ! {
 	connected = true
 }
 
+@[unsafe]
 fn (mut s SSLConn) complete_connect() ! {
 	$if trace_ssl ? {
 		eprintln(@METHOD)
@@ -573,6 +583,7 @@ pub fn (mut s SSLConn) write_string(str string) !int {
 }
 
 // Select waits for an io operation (specified by parameter `test`) to be available
+@[unsafe]
 fn select(handle int, test Select, timeout time.Duration) !bool {
 	$if trace_ssl ? {
 		eprintln('${@METHOD} handle: ${handle}, timeout: ${timeout}')

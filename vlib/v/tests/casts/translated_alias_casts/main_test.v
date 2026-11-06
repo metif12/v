@@ -44,15 +44,18 @@ mut:
 	value int
 }
 
+@[unsafe]
 fn test_translated_lowercase_pointer_casts() {
 	zero := &debug_info(0)
 	assert zero == unsafe { nil }
 	raw := unsafe { vcalloc(int(sizeof(debug_info))) }
 	defer { unsafe { free(raw) } }
-	mut pointer := &debug_info(raw)
+	// The allocated bytes hold a debug_info; the cast establishes that pointer type.
+	mut pointer := unsafe { &debug_info(raw) }
 	pointer.value = 42
 	assert pointer.value == 42
 	value := uintptr_t(42)
-	aliased := &uintptr_t(voidptr(&value))
+	// Recover the original pointer after erasing its type through voidptr.
+	aliased := unsafe { &uintptr_t(voidptr(&value)) }
 	assert *aliased == 42
 }

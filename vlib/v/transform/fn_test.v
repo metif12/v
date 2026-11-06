@@ -4,6 +4,38 @@ import v.flat
 import v.token
 import v.types
 
+fn test_heap_channel_argument_validation_preserves_smartcasts() {
+	for narrowed in [false, true] {
+		mut a := flat.FlatAst.new()
+		mut tc := types.TypeChecker.new(&a)
+		choice := flat.source_type_id('Choice')
+		tc.sum_types.set_ids(choice, [flat.source_type_int, flat.source_type_string])
+		mut t := new_transformer(mut a, &tc, map[string]bool{})
+		t.cur_module = 'main'
+		t.validating_generic_spec = true
+		t.set_var_type('ch', flat.source_type_composition_one(.channel, flat.source_type_int))
+		storage := flat.source_type_composition_one(.pointer, choice)
+		t.set_var_type_with_raw('value', storage, storage)
+		index := t.var_type_index('value')
+		t.var_types[index] = VarTypeBinding{
+			...t.var_types[index]
+			heap_value_typ: choice
+		}
+		t.heaped_amp_locals['value'] = true
+		if narrowed {
+			t.push_smartcast('value', flat.source_type_int, choice)
+		}
+		call := t.make_method_call(t.make_ident('ch'), 'try_push', [t.make_ident('value')])
+		_ := t.try_lower_receiver_method_call(call, a.nodes[int(call)]) or { flat.empty_node }
+		if narrowed {
+			assert t.monomorph_errors.len == 0, t.monomorph_errors.str()
+		} else {
+			assert t.monomorph_errors.len == 1, t.monomorph_errors.str()
+			assert t.monomorph_errors[0].contains('cannot use `Choice`'), t.monomorph_errors.str()
+		}
+	}
+}
+
 fn literal_binding_test_node(mut a flat.FlatAst, kind flat.NodeKind, children []flat.NodeId) flat.NodeId {
 	start := a.children.len
 	for child in children {
@@ -66,6 +98,7 @@ fn test_literal_string_call_retains_receiver_while_arguments_grow_ast() {
 	assert a.node(receiver).value == 'abc'
 }
 
+@[unsafe]
 fn test_call_param_type_name_memo_preserves_composites_and_module_locks() {
 	mut a := flat.FlatAst.new()
 	mut tc := types.TypeChecker.new(&a)
@@ -118,9 +151,18 @@ fn test_nested_fn_literal_restores_outer_binding_containers_after_growth() {
 	t.fn_value_locals['outer_callback'] = 'known_callback'
 	t.mut_param_values['outer_0'] = true
 	t.fixed_array_param_values['outer_array'] = true
+	t.escaping_amp_ptrs['outer_ptr'] = true
+	t.escaping_amp_sources['outer_0'] = true
+	t.escape_decl_depths['outer_0'] = 3
+	t.escape_scope_depth = 4
+	t.escaping_fixed_array_view_sources['outer_array'] = true
+	t.escaping_interface_box_locals['outer_interface'] = true
+	t.mut_fixed_array_capture_sources['outer_array'] = true
 	t.heaped_amp_locals['outer_0'] = true
 	t.pointer_value_lvalues['outer_0'] = true
 	t.pointer_value_rvalues['outer_0'] = true
+	t.fixed_array_value_rvalues['outer_array'] = true
+	t.addr_lvalue_pointer_locals['outer_ptr'] = true
 	t.local_closure_cleanup_decls[71] = 'outer_callback'
 	t.local_closure_cleanup_assigns[72] = 'outer_callback'
 	t.local_closure_field_cleanups[73] = true
@@ -166,9 +208,18 @@ fn test_nested_fn_literal_restores_outer_binding_containers_after_growth() {
 	assert t.fn_value_locals['outer_callback'] == 'known_callback'
 	assert t.mut_param_values['outer_0']
 	assert t.fixed_array_param_values['outer_array']
+	assert t.escaping_amp_ptrs['outer_ptr']
+	assert t.escaping_amp_sources['outer_0']
+	assert t.escape_decl_depths['outer_0'] == 3
+	assert t.escape_scope_depth == 4
+	assert t.escaping_fixed_array_view_sources['outer_array']
+	assert t.escaping_interface_box_locals['outer_interface']
+	assert t.mut_fixed_array_capture_sources['outer_array']
 	assert t.heaped_amp_locals['outer_0']
 	assert t.pointer_value_lvalues['outer_0']
 	assert t.pointer_value_rvalues['outer_0']
+	assert t.fixed_array_value_rvalues['outer_array']
+	assert t.addr_lvalue_pointer_locals['outer_ptr']
 	assert t.local_closure_cleanup_decls[71] == 'outer_callback'
 	assert t.local_closure_cleanup_assigns[72] == 'outer_callback'
 	assert t.local_closure_field_cleanups[73]
@@ -1468,6 +1519,7 @@ fn test_pending_generic_specialization_keys_are_private_initialized_maps() {
 	assert !master.pending_generic_fn_spec_keys.contains(generic_fn_spec_key('worker', []u32{}))
 }
 
+@[unsafe]
 fn test_absorb_scoped_batch_replays_overlay_into_master_checker() {
 	mut a := flat.FlatAst.new()
 	mut tc := types.TypeChecker.new(&a)

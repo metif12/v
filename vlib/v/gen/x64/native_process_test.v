@@ -1,10 +1,13 @@
 module x64
 
 import os
-import v.parser
-import v.pref
-import v.ssa
-import v.types
+
+$if linux && amd64 {
+	import v.parser
+	import v.pref
+	import v.ssa
+	import v.types
+}
 
 fn test_native_process_exec_preserves_split_and_quoted_argv() ! {
 	$if !linux || !amd64 {
@@ -69,6 +72,7 @@ fn main() {
 	assert result.exit_code == 0, result.output
 }
 
+@[unsafe]
 fn test_native_process_capture_preserves_output_arguments_exit_status_and_errors() {
 	$if linux && amd64 {
 		path := os.join_path(os.vtmp_dir(), 'x64_process_capture_${os.getpid()}.v')

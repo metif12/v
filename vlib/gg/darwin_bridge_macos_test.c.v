@@ -2,12 +2,19 @@ module gg
 
 import macos
 
+@[unsafe]
 fn C.CGColorSpaceCreateDeviceRGB() voidptr
 fn C.CGColorSpaceRelease(color_space voidptr)
 fn C.CGBitmapContextCreate(data voidptr, width uint, height uint, bits_per_component uint, bytes_per_row uint, color_space voidptr, bitmap_info u32) voidptr
 fn C.CGContextRelease(context voidptr)
 fn C.CGContextSetRGBFillColor(context voidptr, red f64, green f64, blue f64, alpha f64)
 fn C.CGContextSetRGBStrokeColor(context voidptr, red f64, green f64, blue f64, alpha f64)
+
+fn test_darwin_window_refresh_compiles_with_arc() {
+	// Reach the dispatch call when compiling with sokol's -fobjc-arc flag.
+	// The callback also supports programs without an active window.
+	darwin_window_refresh()
+}
 
 fn test_darwin_rectangle_bridge_uses_sdk_geometry() {
 	assert C.gg_darwin_mouse_in_rect(2, 3, 0, 0, 5, 6, false)
@@ -28,6 +35,7 @@ fn test_darwin_rectangle_bridge_uses_sdk_geometry() {
 	assert pixels[20..24] != [u8(0), 0, 0, 0]
 }
 
+@[unsafe]
 fn test_darwin_ellipse_bridges_use_sdk_geometry() {
 	mut pixels := [2304]u8{}
 	color_space := C.CGColorSpaceCreateDeviceRGB()
@@ -55,6 +63,7 @@ fn test_darwin_ellipse_bridges_use_sdk_geometry() {
 	assert pixels[stroke_edge..stroke_edge + 4] != [u8(0), 0, 0, 0]
 }
 
+@[unsafe]
 fn test_darwin_attribute_bridge_returns_objects() {
 	for key in [C.gg_darwin_color_attribute(), C.gg_darwin_font_attribute(), C.gg_darwin_device_size()] {
 		assert key != unsafe { nil }
@@ -62,6 +71,7 @@ fn test_darwin_attribute_bridge_returns_objects() {
 	}
 }
 
+@[unsafe]
 fn test_darwin_diagonal_lines_stay_on_the_native_surface() {
 	mut pixels := [4096]u8{}
 	color_space := C.CGColorSpaceCreateDeviceRGB()

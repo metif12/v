@@ -124,7 +124,7 @@ fn (a &array) data_header() &ArrayDataHeader {
 	return unsafe { &ArrayDataHeader(base_data - array_data_header_size()) }
 }
 
-@[inline]
+@[inline; unsafe]
 fn (a &array) buffer_has_slices() bool {
 	if a.flags.has(array_flag_retained_aligned_fixed) {
 		return true
@@ -139,7 +139,7 @@ fn (a &array) buffer_has_slices() bool {
 	return unsafe { header.has_slices }
 }
 
-@[inline]
+@[inline; unsafe]
 fn (mut a array) mark_buffer_has_slices() {
 	if !a.flags.has(.managed) || a.data == unsafe { nil } {
 		return
@@ -160,7 +160,7 @@ fn (mut a array) mark_buffer_has_slices() {
 
 // Only compiler-generated fixed-element reference escapes retain a buffer.
 // Ordinary slices keep their existing owner lifetime and cleanup behavior.
-@[inline]
+@[inline; unsafe]
 fn (a array) retain_fixed_array_buffer() {
 	header := unsafe { a.data_header() }
 	if header == unsafe { nil } {
@@ -173,7 +173,7 @@ fn (a array) retain_fixed_array_buffer() {
 	}
 }
 
-@[inline]
+@[inline; unsafe]
 fn (a array) buffer_has_retained_fixed_views() bool {
 	header := unsafe { a.data_header() }
 	return header != unsafe { nil } && unsafe { header.retained_fixed_views }
@@ -200,7 +200,7 @@ fn (mut a array) set_managed_flags(is_slice bool) {
 	}
 }
 
-@[inline]
+@[inline; unsafe]
 fn (mut a array) clone_shallow_to_cap(new_cap int) {
 	if new_cap <= 0 {
 		unsafe { a.flags.clear(.managed | .noscan_data | .is_slice) }
@@ -235,6 +235,7 @@ fn v_ni_index(i int, len int) int {
 }
 
 // Internal function, used by V (`nums := []int`)
+@[unsafe]
 fn __new_array(mylen int, cap int, elm_size int) array {
 	panic_on_negative_len(mylen)
 	panic_on_negative_cap(cap)
@@ -408,6 +409,7 @@ fn new_array_from_c_array(len int, cap int, elm_size int, c_array voidptr) array
 // `base` is already an independent (typed/deep) clone produced by the caller
 // (cgen emits `array_clone_static_to_depth(base, depth)`), so this helper just
 // appends `new_count` additional elements stored contiguously at `c_array`.
+@[unsafe]
 fn new_array_from_array_and_c_array(base array, new_count int, elm_size int, c_array voidptr) array {
 	panic_on_negative_len(new_count)
 	mut arr := base
@@ -433,6 +435,7 @@ fn new_array_from_c_array_no_alloc(len int, cap int, elm_size int, c_array voidp
 // ensure_cap increases the `cap` of an array to the required value, if needed.
 // It does so by copying the data to a new memory location (creating a clone),
 // unless `a.cap` is already large enough.
+@[unsafe]
 pub fn (mut a array) ensure_cap(required int) {
 	if required <= a.cap {
 		return
@@ -673,6 +676,7 @@ pub fn (mut a array) delete(i int) {
 // dump(a) // a: [1, 2, 3, 4, 8, 9] // `a` is now different
 // dump(b) // b: [1, 2, 3, 4, 5, 6, 7, 8, 9] // `b` is still the same
 // ```
+@[unsafe]
 pub fn (mut a array) delete_many(i int, size int) {
 	if i < 0 || i64(i) + i64(size) > i64(a.len) {
 		if size > 1 {
@@ -739,6 +743,7 @@ pub fn (mut a array) delete_many(i int, size int) {
 // clear clears the array without deallocating the allocated data.
 // It does it by setting the array length to `0`
 // Example: mut a := [1,2]; a.clear(); assert a.len == 0
+@[unsafe]
 pub fn (mut a array) clear() {
 	if a.needs_unique_shrink() {
 		unsafe { a.flags.clear(.managed | .noscan_data | .is_slice) }
@@ -1233,8 +1238,8 @@ $if !v3_backend ? {
 }
 
 // copy_element_to copies a single `element_size` byte element from `src` to `dest`.
-// It dispatches the common small element sizes to `vmemcpy` with a *compile time constant*
-// size: since `vmemcpy` is inlined and forwards to `C.memcpy`, a literal size lets the C
+// It dispatches the common small element sizes to `vmemcpy_unchecked` with a *compile time
+// constant* size: since it is inlined and forwards to `C.memcpy`, a literal size lets the C
 // backend inline the copy as plain loads/stores instead of a `memcpy` library call, which
 // otherwise dominates the cost of single element pushes (`a << x`) in hot loops.
 // The copy semantics stay exactly those of `memcpy`, so it is safe for arbitrary element
@@ -1243,12 +1248,12 @@ $if !v3_backend ? {
 fn copy_element_to(dest voidptr, src voidptr, element_size int) {
 	unsafe {
 		match element_size {
-			1 { vmemcpy(dest, src, 1) }
-			2 { vmemcpy(dest, src, 2) }
-			4 { vmemcpy(dest, src, 4) }
-			8 { vmemcpy(dest, src, 8) }
-			16 { vmemcpy(dest, src, 16) }
-			else { vmemcpy(dest, src, element_size) }
+			1 { vmemcpy_unchecked(dest, src, 1) }
+			2 { vmemcpy_unchecked(dest, src, 2) }
+			4 { vmemcpy_unchecked(dest, src, 4) }
+			8 { vmemcpy_unchecked(dest, src, 8) }
+			16 { vmemcpy_unchecked(dest, src, 16) }
+			else { vmemcpy_unchecked(dest, src, element_size) }
 		}
 	}
 }

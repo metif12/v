@@ -381,16 +381,27 @@ pub fn vfopen(path string, mode string) !&C.FILE {
 	if path == '' {
 		return error('vfopen called with ""')
 	}
-	mut fp := &C.FILE(unsafe { nil })
 	$if windows {
-		fp = C._wfopen(path.to_wide(), mode.to_wide())
+		w_path := path.to_wide()
+		w_mode := mode.to_wide()
+		defer {
+			unsafe {
+				free(w_path)
+				free(w_mode)
+			}
+		}
+		fp := C._wfopen(w_path, w_mode)
+		if isnil(voidptr(fp)) {
+			return error_posix(msg: 'failed to open file "${path}"')
+		}
+		return fp
 	} $else {
-		fp = C.fopen(&char(path.str), &char(mode.str))
+		fp := C.fopen(&char(path.str), &char(mode.str))
+		if isnil(voidptr(fp)) {
+			return error_posix(msg: 'failed to open file "${path}"')
+		}
+		return fp
 	}
-	if isnil(voidptr(fp)) {
-		return error_posix(msg: 'failed to open file "${path}"')
-	}
-	return fp
 }
 
 // fileno returns the file descriptor of an opened C file.
@@ -802,7 +813,7 @@ pub fn get_raw_line() string {
 	}
 }
 
-// get_raw_stdin will get the raw input from stdin.
+// get_raw_stdin reads all bytes from stdin until EOF, preserving newlines and NUL bytes.
 pub fn get_raw_stdin() []u8 {
 	$if windows {
 		unsafe {
@@ -816,7 +827,7 @@ pub fn get_raw_stdin() []u8 {
 				pos := buf + offset
 				res := C.ReadFile(h_input, pos, block_bytes, voidptr(&bytes_read), 0)
 				offset += bytes_read
-				if !res {
+				if !res || bytes_read == 0 {
 					break
 				}
 				new_size := offset + block_bytes + (block_bytes - bytes_read)
@@ -831,21 +842,23 @@ pub fn get_raw_stdin() []u8 {
 			}
 		}
 	} $else {
-		max := uint(0)
-		buf := &u8(unsafe { nil })
-		nr_chars := unsafe { C.getline(voidptr(&buf), &max, C.stdin) }
-		$if race ? {
-			// A read that failed does not happen after the writes to stdin.
-			if nr_chars >= 0 || C.ferror(C.stdin) == 0 {
-				race_file_read()
+		mut result := []u8{}
+		mut buf := [4096]u8{}
+		for {
+			// Use stdio so reads share the buffer used by get_raw_line.
+			nread := int(C.fread(&buf[0], 1, buf.len, C.stdin))
+			$if race ? {
+				// A read that failed does not happen after the writes to stdin.
+				if nread > 0 || C.ferror(C.stdin) == 0 {
+					race_file_read()
+				}
 			}
+			if nread == 0 {
+				break
+			}
+			result << buf[..nread]
 		}
-		return array{
-			element_size: 1
-			data:         voidptr(buf)
-			len:          if nr_chars < 0 { 0 } else { nr_chars }
-			cap:          int(max)
-		}
+		return result
 	}
 }
 
@@ -1015,6 +1028,12 @@ pub fn chdir(path string) ! {
 // getwd returns the absolute path of the current directory.
 @[manualfree]
 pub fn getwd() string {
+	$if vlibc ? {
+		$if linux && freestanding {
+			wd, e := vlibc_getcwd()
+			return if e == .enoerror { wd } else { '' }
+		}
+	}
 	unsafe {
 		$if windows {
 			buf := [max_path_buffer_size]u8{}

@@ -59,6 +59,7 @@ fn test_generic_channel_try_push_and_try_pop() {
 	assert box.take()? == 'hello'
 }
 
+@[unsafe]
 fn test_generic_channel_try_alias_and_pointer_storage() {
 	ch := chan ChannelNumber{cap: 1}
 	assert put(ch, ChannelNumber(12))
@@ -105,6 +106,12 @@ fn pop_shared[T](ch chan T, shared value T) {
 	}
 }
 
+fn pop_shared_int(ch chan int, shared value int) {
+	lock value {
+		assert ch.try_pop(mut value) == .success
+	}
+}
+
 fn test_generic_channel_try_void_pointer_and_shared_storage() {
 	pointers := chan voidptr{cap: 1}
 	pointed := 42
@@ -118,6 +125,11 @@ fn test_generic_channel_try_void_pointer_and_shared_storage() {
 	rlock value {
 		assert value == 23
 	}
+	ch <- 24
+	pop_shared_int(ch, shared value)
+	rlock value {
+		assert value == 24
+	}
 }
 
 type ChannelValue = int | string
@@ -128,4 +140,20 @@ fn test_generic_channel_try_full_sum_type_storage() {
 	assert take(ch)? == ChannelValue('hello')
 	assert put(ch, ChannelValue(42))
 	assert take(ch)? == ChannelValue(42)
+}
+
+fn push_heap_smartcast[T](ch chan T) &ChannelValue {
+	mut value := ChannelValue(42)
+	escaped := &value
+	if value is int {
+		assert ch.try_push(value) == .success
+	}
+	return escaped
+}
+
+fn test_generic_channel_try_push_keeps_heap_smartcast() {
+	ch := chan int{cap: 1}
+	value := push_heap_smartcast[int](ch)
+	assert <-ch == 42
+	assert *value == ChannelValue(42)
 }

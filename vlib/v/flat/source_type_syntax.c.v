@@ -2246,9 +2246,16 @@ struct SourceTypeSyntaxEntry {
 __global g_source_type_syntax_pages [source_type_chunk_count]voidptr
 __global g_source_type_syntax_empty voidptr
 
-// A bounded recent cache shortcuts page lookup for positive IDs. Every pointer
-// refers to immutable process-owned storage; the payload owner rejects collisions.
-__global g_source_type_syntax_recent [4096]voidptr
+// One dense pointer per ID, including the empty spelling at slot zero, answers
+// lookups with a single indexed load. Every pointer refers to immutable
+// process-owned storage. The pages above stay authoritative: a publication
+// writes its page slot first, and a reader that sees no dense pointer yet
+// still finds the entry there. 32-bit hosts keep a small dense table and read
+// later IDs from their pages.
+__global g_source_type_syntax_entries &voidptr
+// Only the spelling writer lock accesses this flag. Do not retry a refused
+// optional reservation on every syntax publication.
+__global g_source_type_syntax_dense_attempted bool
 
 // Prefixes and suffixes have independent cache entries: requesting either view
 // never interns the other. Empty views are cached too. The spelling ID is stored
@@ -2274,6 +2281,7 @@ fn source_type_syntax_underscore_ids(id u32, suffix bool) []u32 {
 	return source_type_syntax_underscore_miss(slot, id, suffix)
 }
 
+@[unsafe]
 fn source_type_syntax_underscore_miss(slot int, id u32, suffix bool) []u32 {
 	// Temporary render buffers and numeric arrays have been copied before return.
 	mut scratch_scope := voidptr(unsafe { nil })
@@ -2355,6 +2363,7 @@ fn source_type_syntax_underscore_head(slot int) &SourceTypeUnderscoreEntry {
 	}
 }
 
+@[unsafe]
 fn source_type_syntax_underscore_find(slot int, id u32, suffix bool) &SourceTypeUnderscoreEntry {
 	mut entry := source_type_syntax_underscore_head(slot)
 	for !isnil(entry) {
@@ -2396,6 +2405,7 @@ fn source_type_syntax_lexical_head(slot int) &SourceTypeLexicalEntry {
 	return unsafe { &SourceTypeLexicalEntry(source_type_syntax_pointer_load(voidptr(&g_source_type_lexical_views[slot]))) }
 }
 
+@[unsafe]
 fn source_type_syntax_lexical_find(slot int, id u32, kind SourceTypeLexicalKind) &SourceTypeLexicalEntry {
 	mut entry := source_type_syntax_lexical_head(slot)
 	for !isnil(entry) {
@@ -2412,6 +2422,7 @@ fn source_type_syntax_lexical(id u32, kind SourceTypeLexicalKind) &SourceTypeLex
 	return source_type_syntax_lexical_miss(slot, id, kind)
 }
 
+@[unsafe]
 fn source_type_syntax_lexical_miss(slot int, id u32, kind SourceTypeLexicalKind) &SourceTypeLexicalEntry {
 	// Temporary render buffers and numeric arrays have been copied before return.
 	mut scratch_scope := voidptr(unsafe { nil })
@@ -2533,6 +2544,7 @@ fn source_type_syntax_flattened_receiver_ids(id u32) []u32 {
 	return source_type_syntax_flattened_receiver_miss(slot, id)
 }
 
+@[unsafe]
 fn source_type_syntax_flattened_receiver_miss(slot int, id u32) []u32 {
 	// Temporary render buffers and numeric arrays have been copied before return.
 	mut scratch_scope := voidptr(unsafe { nil })
@@ -2594,6 +2606,7 @@ fn source_type_syntax_flattened_receiver_head(slot int) &SourceTypeFlattenedRece
 	return unsafe { &SourceTypeFlattenedReceiverEntry(source_type_syntax_pointer_load(voidptr(&g_source_type_flattened_receivers[slot]))) }
 }
 
+@[unsafe]
 fn source_type_syntax_flattened_receiver_find(slot int, id u32) &SourceTypeFlattenedReceiverEntry {
 	mut entry := source_type_syntax_flattened_receiver_head(slot)
 	for !isnil(entry) {
@@ -2665,6 +2678,7 @@ fn source_type_capture_head(slot int) &SourceTypeCaptureEntry {
 	}
 }
 
+@[unsafe]
 fn source_type_capture_find(slot int, actual u32, prefix u32, suffix u32) &SourceTypeCaptureEntry {
 	mut entry := source_type_capture_head(slot)
 	for !isnil(entry) {
@@ -2738,6 +2752,7 @@ fn source_type_encoded_prefix_head(slot int) &SourceTypeEncodedPrefixEntry {
 	}
 }
 
+@[unsafe]
 fn source_type_encoded_prefix_find(slot int, actual u32, base u32) &SourceTypeEncodedPrefixEntry {
 	mut entry := source_type_encoded_prefix_head(slot)
 	for !isnil(entry) {
@@ -2840,6 +2855,7 @@ fn source_type_predicate_head(slot int) &SourceTypePredicateEntry {
 	}
 }
 
+@[unsafe]
 fn source_type_predicate_find(slot int, actual u32, parameter u32, kind SourceTypePredicate) &SourceTypePredicateEntry {
 	mut entry := source_type_predicate_head(slot)
 	for !isnil(entry) {
@@ -2880,19 +2896,25 @@ fn source_type_syntax_pointer_store(slot voidptr, value voidptr) {
 	}
 }
 
-@[direct_array_access; inline]
+@[direct_array_access; inline; unsafe]
 fn source_type_syntax_find(id u32) &SourceTypeSyntaxEntry {
+	dense := unsafe { &voidptr(source_type_syntax_pointer_load(voidptr(&g_source_type_syntax_entries))) }
+	if !isnil(dense) && id <= source_type_flags_capacity() {
+		// The acquire load makes the immutable entry and its payload visible.
+		entry := unsafe { &SourceTypeSyntaxEntry(source_type_syntax_pointer_load(voidptr(&dense[id]))) }
+		if !isnil(entry) {
+			return entry
+		}
+	}
+	return source_type_syntax_find_in_pages(id)
+}
+
+// source_type_syntax_find_in_pages reads the authoritative page slot of an ID:
+// the path for IDs the dense table does not hold yet, or does not cover.
+@[direct_array_access; noinline]
+fn source_type_syntax_find_in_pages(id u32) &SourceTypeSyntaxEntry {
 	if id == 0 {
 		return unsafe { &SourceTypeSyntaxEntry(source_type_syntax_pointer_load(voidptr(&g_source_type_syntax_empty))) }
-	}
-	recent_slot := voidptr(&g_source_type_syntax_recent[id & 4095])
-	recent := unsafe { &SourceTypeSyntaxEntry(source_type_syntax_pointer_load(recent_slot)) }
-	if !isnil(recent) {
-		// The acquire load makes the immutable owner and payload visible together.
-		owner := unsafe { *&u32(recent.syntax.payload) }
-		if owner == id {
-			return recent
-		}
 	}
 	idx := id - 1
 	page_index := idx >> source_type_chunk_bits
@@ -2905,11 +2927,7 @@ fn source_type_syntax_find(id u32) &SourceTypeSyntaxEntry {
 		return unsafe { nil }
 	}
 	slot := unsafe { voidptr(&(&voidptr(page))[idx & (source_type_chunk_size - 1)]) }
-	entry := unsafe { &SourceTypeSyntaxEntry(source_type_syntax_pointer_load(slot)) }
-	if !isnil(entry) {
-		source_type_syntax_pointer_store(recent_slot, voidptr(entry))
-	}
-	return entry
+	return unsafe { &SourceTypeSyntaxEntry(source_type_syntax_pointer_load(slot)) }
 }
 
 @[direct_array_access]
@@ -2917,6 +2935,7 @@ fn source_type_syntax_publish(id u32, entry &SourceTypeSyntaxEntry) {
 	// The caller owns the spelling writer lock and has rechecked this ID.
 	if id == 0 {
 		source_type_syntax_pointer_store(voidptr(&g_source_type_syntax_empty), voidptr(entry))
+		source_type_syntax_publish_dense(id, entry)
 		return
 	}
 	idx := id - 1
@@ -2936,8 +2955,31 @@ fn source_type_syntax_publish(id u32, entry &SourceTypeSyntaxEntry) {
 		// Publish a new page only after its first complete entry is visible.
 		source_type_syntax_pointer_store(voidptr(&g_source_type_syntax_pages[page_index]), page)
 	}
-	// Seed only complete entries, after publication in the authoritative pages.
-	source_type_syntax_pointer_store(voidptr(&g_source_type_syntax_recent[id & 4095]), voidptr(entry))
+	// Publish the dense pointer only after the authoritative page holds the entry.
+	source_type_syntax_publish_dense(id, entry)
+}
+
+// source_type_syntax_publish_dense records a published entry in the dense
+// per-ID table, trying one optional allocation under the writer lock. The page
+// entry is already published and remains usable if the reservation fails.
+@[direct_array_access]
+fn source_type_syntax_publish_dense(id u32, entry &SourceTypeSyntaxEntry) {
+	if id > source_type_flags_capacity() {
+		return
+	}
+	mut dense := unsafe { &voidptr(source_type_syntax_pointer_load(voidptr(&g_source_type_syntax_entries))) }
+	if isnil(dense) {
+		if g_source_type_syntax_dense_attempted {
+			return
+		}
+		g_source_type_syntax_dense_attempted = true
+		dense = unsafe { &voidptr(source_type_dense_table_alloc(sizeof(voidptr))) }
+		if isnil(dense) {
+			return
+		}
+		source_type_syntax_pointer_store(voidptr(&g_source_type_syntax_entries), voidptr(dense))
+	}
+	source_type_syntax_pointer_store(unsafe { voidptr(&dense[id]) }, voidptr(entry))
 }
 
 fn source_type_syntax_miss(id u32) &SourceTypeSyntax {
@@ -4108,6 +4150,7 @@ fn source_type_syntax_parse(id u32, raw string) SourceTypeSyntaxParsed {
 
 // The caller keeps a general parser's arena alive until all array values are copied.
 // Direct parser checks use the unscoped wrapper and retain their existing lifetime.
+@[unsafe]
 fn source_type_syntax_parse_scoped(id u32, raw string, scoped bool) (SourceTypeSyntaxParsed, voidptr) {
 	mut simple := raw.len > 0
 	mut qualified := raw.len > 0

@@ -27,6 +27,7 @@ fn help_cmd() Command {
 }
 
 // print_help_for_command outputs the help message of `help_cmd`.
+@[unsafe]
 pub fn print_help_for_command(cmd Command) ! {
 	if cmd.args.len > 0 {
 		for sub_cmd in cmd.commands {
@@ -114,22 +115,14 @@ pub fn (cmd &Command) help_message() string {
 fn (cmd &Command) help_columns() (int, int) {
 	mut abbrev_len := 0
 	mut name_len := min_description_indent_len
-	if cmd.posix_mode {
-		for flag in cmd.flags {
-			if flag.abbrev != '' {
-				abbrev_len = max(abbrev_len, flag.abbrev.len + spacing + 1) // + 1 for '-' in front
-			}
-			name_len =
-				max(name_len, abbrev_len + flag.name.len + spacing + 2) // + 2 for '--' in front
+	for flag in cmd.flags {
+		if flag.abbrev != '' {
+			abbrev_len = max(abbrev_len, flag.abbrev.len + spacing + 1) // + 1 for '-' in front
 		}
-	} else {
-		for flag in cmd.flags {
-			if flag.abbrev != '' {
-				abbrev_len = max(abbrev_len, flag.abbrev.len + spacing + 1) // + 1 for '-' in front
-			}
-			name_len =
-				max(name_len, abbrev_len + flag.name.len + spacing + 1) // + 1 for '-' in front
-		}
+	}
+	prefix_len := if cmd.posix_mode { 2 } else { 1 }
+	for flag in cmd.flags {
+		name_len = max(name_len, abbrev_len + prefix_len + flag.name.len + spacing)
 	}
 	for command in cmd.commands {
 		name_len = max(name_len, command.display_name().len + spacing)

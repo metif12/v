@@ -11,8 +11,15 @@ fn C.CreateFiber(dwStackSize uint, lpStartAddress voidptr, lpParameter voidptr) 
 fn C.ConvertThreadToFiber(lpParameter voidptr) voidptr
 fn C.SwitchToFiber(lpFiber voidptr)
 fn C.DeleteFiber(lpFiber voidptr)
-fn C.ConvertFiberToThread()
+fn C.ConvertFiberToThread() i32
+fn C.goroutines_convert_fiber_to_thread() i32
 fn C.GetCurrentFiber() voidptr
+fn C.YieldProcessor()
+
+@[inline]
+fn yield_processor() {
+	C.YieldProcessor()
+}
 
 // GetLastError value of ConvertThreadToFiber on a thread that is already a fiber
 const error_already_fiber = u32(1280)
@@ -26,6 +33,7 @@ pub mut:
 // context_init creates a new fiber that runs `entry_fn` with `arg`.
 // A reused dead goroutine has no fiber any more: goexit0 gave it to the scheduler,
 // which deleted it (see context_detach_dead).
+@[unsafe]
 pub fn context_init(mut ctx Context, stack voidptr, stack_size int, entry_fn fn (voidptr), arg voidptr) {
 	// Windows fibers manage their own stack, so we ignore the stack param
 	ctx.uctx = C.CreateFiber(uint(stack_size), voidptr(entry_fn), arg)
@@ -45,6 +53,7 @@ pub fn context_set(to &Context) {
 // context_detach_dead takes the fiber out of the context of a goroutine that is exiting.
 // That fiber is still running, so it cannot be deleted yet: the scheduler passes the
 // returned handle to context_release_dead after it has switched back to g0.
+@[unsafe]
 fn context_detach_dead(mut ctx Context) voidptr {
 	fiber := ctx.uctx
 	ctx.uctx = unsafe { nil }
@@ -52,6 +61,7 @@ fn context_detach_dead(mut ctx Context) voidptr {
 }
 
 // context_release_dead deletes a fiber returned by context_detach_dead.
+@[unsafe]
 fn context_release_dead(fiber voidptr) {
 	if fiber != unsafe { nil } {
 		C.DeleteFiber(fiber)
@@ -65,6 +75,7 @@ pub fn current_fiber() voidptr {
 
 // context_destroy deletes an inactive native fiber owned by ctx, if any.
 // The currently running fiber and converted thread fibers must not be destroyed.
+@[unsafe]
 pub fn context_destroy(mut ctx Context) {
 	if ctx.uctx != unsafe { nil } && !ctx.is_thread_fiber {
 		C.DeleteFiber(ctx.uctx)
@@ -75,6 +86,7 @@ pub fn context_destroy(mut ctx Context) {
 // convert_thread_to_fiber must be called once per OS thread before using fibers.
 // If other code already made the thread a fiber, it returns that fiber, with
 // `is_thread_fiber` false, since the thread is not ours to convert back.
+@[unsafe]
 pub fn convert_thread_to_fiber() Context {
 	fiber := C.ConvertThreadToFiber(unsafe { nil })
 	if fiber != unsafe { nil } {
@@ -97,6 +109,13 @@ pub fn convert_thread_to_fiber() Context {
 // thread stops. It does nothing for a thread that was already a fiber.
 fn convert_fiber_to_thread(ctx Context) {
 	if ctx.is_thread_fiber {
-		C.ConvertFiberToThread()
+		converted := $if tinyc {
+			C.goroutines_convert_fiber_to_thread()
+		} $else {
+			C.ConvertFiberToThread()
+		}
+		if converted == 0 {
+			panic('goroutines: ConvertFiberToThread failed, error code ${C.GetLastError()}')
+		}
 	}
 }
