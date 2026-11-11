@@ -17,6 +17,14 @@ session resumption are out of scope for v1.
 ./v -d pure_tls your_program.v
 ```
 
+## Server credentials
+
+Configure both `Config.cert` and `Config.key` (PEM file paths), or provide
+`cert_pem` and `key_pem`. The server currently supports P-256 ECDSA leaf
+certificates and keys. If neither is configured, the server creates a temporary
+self-signed `localhost` certificate; clients using chain verification will not
+trust it unless it is explicitly added to their trust store.
+
 ## Design notes
 
 - Pure V only: no `C.`/`JS.` symbols in `.v` files. Enforced by running tests
@@ -24,8 +32,8 @@ session resumption are out of scope for v1.
 - Classical cryptography reuses the existing pure-V primitives
   (`crypto.ecdsa`, `crypto.x509`, `x.crypto.curve25519`, `crypto.hkdf`,
   `crypto.aes`, `crypto.sha256`).
-- Post-quantum support targets hybrid key exchange (`X25519MLKEM768`) and
-  ML-DSA certificate verification first; SLH-DSA stays on the OpenSSL wrapper
+- Post-quantum key exchange uses `X25519MLKEM768`. ML-DSA certificate
+  verification is not implemented yet; SLH-DSA remains on the OpenSSL wrapper
   until a pure-V SLH-DSA module exists.
 - OpenSSL and mbedTLS remain the correctness oracles for differential tests;
   they are never runtime dependencies of this module.
