@@ -16,6 +16,8 @@ jobs:
     env:
       VJOBS: '4'
       VTEST_FAIL_FAST: '1'
+      # tcc lane: lighter builds (this box shares 16GB with the Windows lane).
+      VFLAGS: -cc tcc -no-retry-compilation
     steps:
       - uses: actions/checkout@v7
         with:
@@ -37,6 +39,9 @@ jobs:
         run: ./v -silent test vlib/v/
 
   hunt-windows:
+    # Serialized after hunt-linux: this box shares 16GB between both lanes,
+    # and parallel full-lane runs OOM-killed WSL (runner lost communication).
+    needs: [hunt-linux]
     runs-on: [self-hosted, win-local]
     timeout-minutes: 120
     env:
@@ -59,8 +64,10 @@ jobs:
           .\makev.bat -tcc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build optimized compiler for vet
+        # -fno-lto: scoop gcc ships no working LTO tools; without this the
+        # -prod link dies in lto-wrapper (worse under parallel-lane load).
         run: |
-          .\v.exe -cc gcc -o v.prod.exe -prod cmd/v
+          .\v.exe -cc gcc -cflags -fno-lto -o v.prod.exe -prod cmd/v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Cleancode vet
         run: |
