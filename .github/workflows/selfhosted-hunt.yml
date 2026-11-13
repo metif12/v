@@ -49,6 +49,11 @@ jobs:
           persist-credentials: false
       - name: Prepare private tool cache
         run: .\.github\workflows\setup_windows_tool_cache.ps1
+      - name: Add Git usr/bin to PATH for env.exe
+        # Hosted windows runners have Git usr/bin on PATH; self-hosted needs it
+        # explicitly: compiler tests invoke `env VJOBS=2 ...` (see
+        # vlib/v/compiler_tests/c_callback_const_qualifier_codegen_test.v).
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\Git\usr\bin'
       - name: Build with makev.bat -tcc
         run: |
           .\makev.bat -tcc
