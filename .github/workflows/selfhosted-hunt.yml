@@ -1,0 +1,60 @@
+name: Selfhosted Hunt
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci-hunt
+
+permissions:
+  contents: read
+
+jobs:
+  hunt-linux:
+    runs-on: [self-hosted, wsl-local]
+    timeout-minutes: 120
+    env:
+      VJOBS: '4'
+      VTEST_FAIL_FAST: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build V
+        run: make -j4
+      - name: Cleancode
+        run: ./v -silent test-cleancode
+      - name: Compiler suite
+        run: ./v -silent test vlib/v/
+
+  hunt-windows:
+    runs-on: [self-hosted, win-local]
+    timeout-minutes: 120
+    env:
+      VJOBS: '4'
+      VTEST_FAIL_FAST: '1'
+      VFLAGS: -cc tcc -no-retry-compilation
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Prepare private tool cache
+        run: .\.github\workflows\setup_windows_tool_cache.ps1
+      - name: Build with makev.bat -tcc
+        run: |
+          .\makev.bat -tcc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Cleancode vet
+        run: |
+          $env:VTEST_CLEANCODE_STAGE = 'vet'
+          .\v.exe -silent test-cleancode
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Cleancode fmt
+        run: |
+          $env:VTEST_CLEANCODE_STAGE = 'fmt'
+          .\v.exe -silent test-cleancode
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compiler suite
+        run: |
+          .\v.exe -silent test vlib/v/
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
