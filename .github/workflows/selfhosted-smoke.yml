@@ -1,0 +1,35 @@
+name: Selfhosted Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - selfhosted-smoke
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-windows:
+    runs-on: [self-hosted, win-local]
+    timeout-minutes: 10
+    steps:
+      - run: |
+          whoami
+          echo "OS=$env:OS"
+          $PSVersionTable.PSVersion
+          pwsh --version
+          C:\Users\MR\Projects\v\v.exe version
+          gcc --version | Select-Object -First 1
+
+  smoke-linux:
+    runs-on: [self-hosted, wsl-local]
+    timeout-minutes: 10
+    steps:
+      - run: |
+          whoami
+          uname -a
+          lsb_release -d
+          gcc --version | head -n 1
+          clang --version | head -n 1
+          /mnt/c/Users/MR/Projects/v/v.exe version
