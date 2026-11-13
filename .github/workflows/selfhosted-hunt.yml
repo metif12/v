@@ -22,6 +22,13 @@ jobs:
           persist-credentials: false
       - name: Build V
         run: make -j4
+      - name: Install dependencies for examples and tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql libpq-dev libssl-dev sqlite3 libsqlite3-dev valgrind nodejs
+          sudo apt-get install -y libfreetype6-dev libxi-dev libxcursor-dev libgl-dev libxrandr-dev libasound2-dev
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev libwayland-egl1 libxkbcommon-x11-dev wayland-protocols libegl-dev
+          sudo apt-get install -y libx11-dev libx11-xcb-dev libgl1-mesa-dri xauth xvfb
       - name: Cleancode
         run: ./v -silent test-cleancode
       - name: Compiler suite
@@ -44,17 +51,21 @@ jobs:
         run: |
           .\makev.bat -tcc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build optimized compiler for vet
+        run: |
+          .\v.exe -o v.prod.exe -prod cmd/v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Cleancode vet
         run: |
           $env:VTEST_CLEANCODE_STAGE = 'vet'
-          .\v.exe -silent test-cleancode
+          .\v.prod.exe -silent test-cleancode
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Cleancode fmt
         run: |
           $env:VTEST_CLEANCODE_STAGE = 'fmt'
-          .\v.exe -silent test-cleancode
+          .\v.prod.exe -silent test-cleancode
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Compiler suite
         run: |
-          .\v.exe -silent test vlib/v/
+          .\v.prod.exe -silent test vlib/v/
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
