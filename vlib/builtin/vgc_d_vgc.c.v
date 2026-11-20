@@ -70,6 +70,10 @@ const vgc_num_span_classes = 136 // 68 * 2 (scan + noscan variants)
 // see them as 0: arenas get sized to a single page instead of 64MB.
 // The number of arenas has no limit: their table grows with the heap.
 const vgc_arena_size = 64 * 1024 * 1024 // 64MB per arena (an object larger than that gets its own)
+// Smallest heap goal: lets the first collections happen early so garbage is recycled
+// into spans instead of piling into fresh arenas. Go's controller starts at 4 MiB;
+// vgc keeps a larger floor because every cycle walks all spans and recommits pages.
+const vgc_min_heap_goal = 16 * 1024 * 1024
 // The arena map finds the arena of an address in constant time, however many arenas there are.
 // It cuts the address space into granules of 64 MB, the smallest arena size, so a granule
 // overlaps at most two arenas: one that ends in it and one that starts in it. It covers the low
@@ -330,7 +334,8 @@ pub fn vgc_init() {
 	C.vgc_init_size_tables()
 	vgc_heap.gc_enabled = 1
 	vgc_heap.gc_percent = 100
-	vgc_heap.next_gc = 256 * 1024 * 1024 // favor throughput over early collections
+	// Start collecting early: the pacer retunes the goal after every cycle.
+	vgc_heap.next_gc = vgc_min_heap_goal
 	vgc_heap.gc_phase = vgc_phase_off
 	C.vgc_set_thread_exit_hook(vgc_on_thread_exit)
 	// Register the main thread

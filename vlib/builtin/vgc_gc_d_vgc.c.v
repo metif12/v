@@ -915,9 +915,11 @@ fn vgc_update_trigger() {
 	gc_percent := u64(vgc_heap.gc_percent)
 
 	mut goal := marked + marked * gc_percent / 100
-	// Avoid very small heap goals that force frequent full cycles on bursty workloads.
-	if goal < 256 * 1024 * 1024 {
-		goal = 256 * 1024 * 1024
+	// Keep a small floor so tiny heaps do not collect on every span fill;
+	// above it the goal paces with live data (GOGC), recycling garbage
+	// into spans instead of growing fresh arenas without bound.
+	if goal < u64(vgc_min_heap_goal) {
+		goal = u64(vgc_min_heap_goal)
 	}
 	C.vgc_atomic_store_u64(&vgc_heap.next_gc, goal)
 }
