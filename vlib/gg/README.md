@@ -154,6 +154,62 @@ uses column vectors, so the helpers transform the basis vectors instead of
 copying the 16 floats; this keeps `m4.mul_vec()` and the render matrix
 equivalent.
 
+### Quick start for beginners
+
+`gg.init_3d()` hides the window setup and always enables the depth buffer:
+
+```v cgen
+module main
+
+import gg
+
+fn frame(data voidptr) {
+	ctx := unsafe { &gg.Context(data) }
+	ctx.begin()
+	ctx.set_camera(gg.orbit_camera(gg.Vec3{}, 7))
+	ctx.begin_3d() or { panic(err.msg()) }
+	ctx.draw_cube(gg.Vec3{}, gg.Vec3{2, 2, 2}, gg.red)
+	ctx.end_3d()
+	ctx.end()
+}
+
+fn main() {
+	ctx := gg.init_3d(title: 'hello 3D', frame_fn: frame)!
+	ctx.run_3d()
+}
+```
+
+`gg.quick_3d(title, frame, data)` is the shortest form. `gg.fps_camera(pos,
+target)`, `ctx.enable_camera_controls(.orbit | .fps)` and `ctx.update_camera(e,
+dt)` add mouse-look and movement. Extra primitives: `draw_point_3d`,
+`draw_circle_3d`, `draw_triangle_3d`, `draw_poly_3d`, `draw_torus` and
+`draw_capsule`. `material_gold()`, `material_silver()`, `material_plastic()`,
+`material_matte()`, `light3d()` and `fog()` provide ready-made material values.
+See `examples/gg/3d_hello.v`, `3d_shapes.v` and `3d_first_person.v`.
+
+### Advanced rendering
+
+`ctx.draw_mesh_instanced()` (plus `draw_cubes_instanced` and
+`draw_spheres_instanced`) records many copies in one batch to avoid per-object
+draw commands. `Frustum` helpers (`frustum_from_camera`, `contains_sphere`,
+`contains_aabb`, `contains_mesh`, `cull_model`) skip objects outside the view.
+`gg.RenderTarget3D` from `new_render_target3d(w, h, depth)` is an offscreen
+color/depth target: call `target.begin(color)`, draw, then `target.end()` and
+sample `target.color_image()`. `gg.make_shader3d()` builds a custom shader for
+gg's 3D vertex layout on GL backends; `ctx.set_material_shader(mat, shader)`
+uses it for that material.
+
+### Scene graph, animation and simulation
+
+`Node3D` builds a small transform hierarchy with `add()`, `update_world()` and
+`draw_scene()`. Rotation composition is simple Euler addition; it is not a full
+matrix hierarchy. `PBRMaterial` and `pbr_shade()` add a compact Cook-Torrance
+approximation baked into vertex colors (not a shader-based PBR pipeline).
+`AnimationClip`, `sample_clip()` and `skin_vertices()` provide keyframe
+sampling and weighted CPU skinning with Euler-angle rotations. `Body3D`,
+`step_physics()` and `raycast_bodies()` add basic gravity, collision response
+and picking against spheres/boxes.
+
 ## CPU rendering
 
 `gg` can draw without a window or GPU: `ctx.render_cpu(w, h, clear_color)`
