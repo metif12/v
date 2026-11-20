@@ -200,10 +200,22 @@ fn vgc_test_allocate_pages(n int) {
 	}
 }
 
+// vgc_test_clear_dead_stack overwrites the stack below the caller, where dead frames can still
+// hold pointers that the conservative stack scan would take for live ones.
+@[noinline]
+fn vgc_test_clear_dead_stack() uint {
+	buf := [4096]uint{}
+	return buf[0] + buf[4095]
+}
+
 fn test_every_span_is_swept() {
 	$if vgc ? {
 		// More spans than the 16384 that the collector used to track.
 		vgc_test_allocate_pages(17000)
+		// Scrub the dead allocator frames: a stale stack word can pin one of
+		// the freed spans, and which word survives depends on the C
+		// compiler's frame layout (seen with libtcc vs gcc).
+		assert vgc_test_clear_dead_stack() == 0
 		gc_collect()
 		used := C.vgc_atomic_load_u64(&vgc_heap.arena_used)
 		// The spans of the garbage are free again, and new objects reuse them instead of
