@@ -92,21 +92,28 @@ fn test_a_large_object_is_in_use_until_it_is_collected() {
 	// to point into. With TinyCC on Windows, the heap starts at a few MB, where some constants
 	// in the data segment point. A new object, at another address, is freed then.
 	mut freed := false
+	// Size the probe above the pacing floor: the floor keeps committed headroom,
+	// so a small object can reuse carved spans without growing reported use, and
+	// freeing it creates no pressure to decommit. A probe bigger than the floor
+	// grows the heap while live, and after it is freed the mapped pages exceed
+	// the goal, so vgc returns them to the OS at once.
+	probe := int(vgc_min_heap_goal) + 32 * 1024 * 1024
 	for _ in 0 .. 4 {
+		assert clear_dead_stack() == 0
 		gc_collect()
 		before := gc_heap_usage()
 		base := gc_memory_use()
-		with_big := memory_use_with_a_large_object(int(32 * mb))
-		assert with_big >= base + 32 * mb
+		with_big := memory_use_with_a_large_object(probe)
+		assert with_big >= base + uint(probe)
 		assert clear_dead_stack() == 0
 		gc_collect()
 		after := gc_heap_usage()
 		// The heap memory obtained from the OS is never given up, only unmapped.
 		assert after.heap_size + after.unmapped_bytes >= before.heap_size + before.unmapped_bytes
-		if gc_memory_use() <= with_big - 32 * mb {
+		if gc_memory_use() <= with_big - uint(probe) {
 			$if vgc ? {
 				// vgc returns the pages of a free span to the OS at once.
-				assert after.unmapped_bytes >= before.unmapped_bytes + 32 * mb
+				assert after.unmapped_bytes >= before.unmapped_bytes + uint(probe)
 			}
 			freed = true
 			break
