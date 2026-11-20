@@ -130,6 +130,10 @@ mut:
 	// 0 when no thread does. Only that thread changes the span's alloc bits, and the sweep
 	// skips the span.
 	cached_by int
+	// Whether the span's pages are currently decommitted (returned to the OS).
+	// Set by vgc_put_free_span under heap pressure, cleared when the span is
+	// recommitted on reuse; lets reuse skip a redundant recommit syscall.
+	decommitted bool = false
 	// Linked list pointers for central free lists. In vgc_greentea mode,
 	// `next` doubles as the span work-queue link while `queued` is set.
 	next &VGC_Span = unsafe { nil }
@@ -527,13 +531,19 @@ fn vgc_get_free_span(npages u32, owner int) &VGC_Span {
 	if span == unsafe { nil } {
 		return span
 	}
-	// The pages of a free span were given back to the OS; Windows faults on them until they
-	// are committed again.
-	if C.vgc_os_recommit(voidptr(span.base), uint(npages) * vgc_page_size) == 0 {
-		vgc_push_free_span(mut span)
-		return unsafe { nil }
+	// The pages of a decommitted free span were given back to the OS; Windows
+	// faults on them until they are committed again. Spans kept committed
+	// (no pressure at sweep time) skip the redundant recommit syscall.
+	if span.decommitted {
+		if C.vgc_os_recommit(voidptr(span.base), uint(npages) * vgc_page_size) == 0 {
+			vgc_push_free_span(mut span)
+			return unsafe { nil }
+		}
+		C.vgc_atomic_sub_u64(&vgc_heap.unmapped_bytes, u64(npages) * vgc_page_size)
+		unsafe {
+			(&VGC_Span(span)).decommitted = false
+		}
 	}
-	C.vgc_atomic_sub_u64(&vgc_heap.unmapped_bytes, u64(npages) * vgc_page_size)
 	return span
 }
 
@@ -607,10 +617,22 @@ fn vgc_put_free_span(mut span VGC_Span) {
 	span.queued = false
 	span.hit = false
 	span.rep_addr = 0
-	// Decommit pages to return physical memory to OS
+	// Decommit pages to return physical memory to OS, but only under heap
+	// pressure: when the heap is already below the GC goal, keeping the pages
+	// committed avoids a decommit/recommit cycle (and its page faults) on the
+	// next reuse. heap_size shrinks with every decommit, so this naturally
+	// stops once the pressure is relieved.
 	page_bytes := uint(npages) * vgc_page_size
-	C.vgc_os_decommit(voidptr(span.base), page_bytes)
-	C.vgc_atomic_add_u64(&vgc_heap.unmapped_bytes, u64(page_bytes))
+	obtained := C.vgc_atomic_load_u64(&vgc_heap.arena_bytes)
+	unmapped := C.vgc_atomic_load_u64(&vgc_heap.unmapped_bytes)
+	goal := C.vgc_atomic_load_u64(&vgc_heap.next_gc)
+	if obtained > unmapped && obtained - unmapped > goal {
+		C.vgc_os_decommit(voidptr(span.base), page_bytes)
+		C.vgc_atomic_add_u64(&vgc_heap.unmapped_bytes, u64(page_bytes))
+		span.decommitted = true
+	} else {
+		span.decommitted = false
+	}
 	vgc_push_free_span(mut span)
 }
 
@@ -816,6 +838,7 @@ fn vgc_span_init(mut span VGC_Span, class_idx u8, noscan bool) {
 
 	span.class_idx = class_idx
 	span.noscan = noscan
+	span.decommitted = false
 	span.elem_size = size
 	span.npages = npages
 	span.nelems = nobjs
@@ -1205,6 +1228,7 @@ fn vgc_alloc_large(n uint, noscan bool, zero_fill bool, cache_idx int) voidptr {
 	unsafe {
 		span.class_idx = 0
 		span.noscan = noscan
+		span.decommitted = false // get_free_span recommitted it if needed
 		span.elem_size = u32(n)
 		span.nelems = 1
 		span.alloc_count = 1
