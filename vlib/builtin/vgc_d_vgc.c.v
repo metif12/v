@@ -329,6 +329,20 @@ __global vgc_arena_lo = uint(0)
 @[cinit]
 __global vgc_arena_hi = uint(0)
 
+// Single-entry span lookup cache: consecutive allocations and marks usually hit
+// the same span (tree children, dense arrays, tiny packing), so skip the arena
+// map walk on a hit. Entries stay valid forever: spans never move and their
+// page-map entries never change. Benign under threads (last writer wins, and
+// every stored triple is a valid mapping for its range).
+@[cinit]
+__global vgc_span_cache_base = uint(0)
+
+@[cinit]
+__global vgc_span_cache_size = uint(0)
+
+@[cinit]
+__global vgc_span_cache_span = unsafe { nil }
+
 // ============================================================
 // Initialization
 // ============================================================
@@ -1438,6 +1452,15 @@ fn vgc_find_span(ptr voidptr) &VGC_Span {
 	if addr < vgc_arena_lo || addr >= vgc_arena_hi {
 		return unsafe { nil }
 	}
+	// Single-entry span cache (see the globals above): consecutive lookups -
+	// shading a child right after its parent, scanning an object just shaded,
+	// packing a tiny block - usually land in the same span.
+	if addr - vgc_span_cache_base < vgc_span_cache_size {
+		cached := unsafe { &VGC_Span(vgc_span_cache_span) }
+		if cached != unsafe { nil } {
+			return cached
+		}
+	}
 	// The arena map lookup of vgc_find_arena, without a call: marking calls this for every word
 	// that it scans.
 	g := addr >> vgc_granule_shift
@@ -1447,11 +1470,23 @@ fn vgc_find_span(ptr voidptr) &VGC_Span {
 			granule := unsafe { &chunk[g & (vgc_arena_map_l2_size - 1)] }
 			mut a := granule.arena[0]
 			if a != unsafe { nil } && addr - a.base < a.size {
-				return unsafe { a.page_span[(addr - a.base) >> vgc_page_shift] }
+				span := unsafe { a.page_span[(addr - a.base) >> vgc_page_shift] }
+				if span != unsafe { nil } {
+					vgc_span_cache_base = span.base
+					vgc_span_cache_size = uint(span.npages) * vgc_page_size
+					vgc_span_cache_span = unsafe { voidptr(span) }
+				}
+				return span
 			}
 			a = granule.arena[1]
 			if a != unsafe { nil } && addr - a.base < a.size {
-				return unsafe { a.page_span[(addr - a.base) >> vgc_page_shift] }
+				span := unsafe { a.page_span[(addr - a.base) >> vgc_page_shift] }
+				if span != unsafe { nil } {
+					vgc_span_cache_base = span.base
+					vgc_span_cache_size = uint(span.npages) * vgc_page_size
+					vgc_span_cache_span = unsafe { voidptr(span) }
+				}
+				return span
 			}
 		}
 	}
@@ -1462,7 +1497,13 @@ fn vgc_find_span(ptr voidptr) &VGC_Span {
 	if a == unsafe { nil } {
 		return unsafe { nil }
 	}
-	return unsafe { a.page_span[(addr - a.base) >> vgc_page_shift] }
+	span := unsafe { a.page_span[(addr - a.base) >> vgc_page_shift] }
+	if span != unsafe { nil } {
+		vgc_span_cache_base = span.base
+		vgc_span_cache_size = uint(span.npages) * vgc_page_size
+		vgc_span_cache_span = unsafe { voidptr(span) }
+	}
+	return span
 }
 
 // vgc_find_arena returns the arena that holds addr, or nil.
