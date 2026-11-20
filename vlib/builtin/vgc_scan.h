@@ -4,6 +4,11 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+// vgc_platform.h provides the tcc __atomic helper declarations (see
+// vgc_atomic_cas_u32) used below; include it explicitly so the order in
+// which translation units pull these two headers cannot matter.
+#include "vgc_platform.h"
+
 #if defined(_MSC_VER)
 #include <intrin.h>
 #endif
@@ -87,11 +92,14 @@ static inline int vgc_bitmap_atomic_test_set(uint8_t* bits, uint32_t index) {
     const uint32_t mask = 1u << (index & 31u);
 #endif
 #if defined(__TINYC__)
-    extern _Bool __atomic_compare_exchange_4(uint32_t*, uint32_t*, uint32_t, int, int, int);
+    // libtcc1 provides the 5-argument helper form (no `weak` parameter),
+    // declared once in vgc_platform.h; use the platform macro (same call
+    // shape as vlib/builtin/prealloc_atomics.h). Declaring the 6-argument
+    // GCC form here conflicts with it.
     uint32_t expected = *word;
     for (;;) {
         if (expected & mask) return 1;
-        if (__atomic_compare_exchange_4(word, &expected, expected | mask, 0, 5, 5)) return 0;
+        if (vgc_atomic_cas_u32(word, &expected, expected | mask)) return 0;
     }
 #elif defined(_MSC_VER)
     volatile long* target = (volatile long*)word;
