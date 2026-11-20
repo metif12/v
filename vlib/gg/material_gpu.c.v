@@ -37,18 +37,15 @@ pub fn (ctx &Context) draw_material_mesh_s(mesh &Mesh3D, pos Vec3, rotation Vec3
 		world_verts[i] = world
 		vertex_colors[i] = material_color(&shade, world, n, cam)
 	}
-	mut verts := []Vec3{cap: mesh.indices.len}
-	mut colors := []Color{cap: mesh.indices.len}
-	mut uvs := []f32{cap: mesh.indices.len * 2}
-	for index in mesh.indices {
-		verts << world_verts[index]
-		colors << vertex_colors[index]
+	mut verts := []Vec3{len: mesh.indices.len}
+	mut colors := []Color{len: mesh.indices.len}
+	mut uvs := []f32{len: mesh.indices.len * 2}
+	for i, index in mesh.indices {
+		verts[i] = world_verts[index]
+		colors[i] = vertex_colors[index]
 		if mesh.uvs.len == mesh.vertices.len * 2 {
-			uvs << mesh.uvs[index * 2]
-			uvs << mesh.uvs[index * 2 + 1]
-		} else {
-			uvs << 0
-			uvs << 0
+			uvs[i * 2] = mesh.uvs[index * 2]
+			uvs[i * 2 + 1] = mesh.uvs[index * 2 + 1]
 		}
 	}
 	mut custom := false

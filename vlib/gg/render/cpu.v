@@ -258,24 +258,53 @@ fn rasterize_tri(mut frame Frame, st &State, cmd Command, uni Uniform, vp Viewpo
 		return
 	}
 
+	// Unpack vertex colors once per triangle instead of once per covered
+	// pixel. The inner loop still computes destination channels per pixel,
+	// but this removes twelve divisions for every fragment of the triangle.
+	r0, g0, b0, a0 := unpack_r(v0.rgba), unpack_g(v0.rgba), unpack_b(v0.rgba), unpack_a(v0.rgba)
+	r1, g1, b1, a1 := unpack_r(v1.rgba), unpack_g(v1.rgba), unpack_b(v1.rgba), unpack_a(v1.rgba)
+	r2, g2, b2, a2 := unpack_r(v2.rgba), unpack_g(v2.rgba), unpack_b(v2.rgba), unpack_a(v2.rgba)
+
 	min_x := int(math.floor(math.min(math.min(p0x, p1x), p2x)))
 	max_x := int(math.ceil(math.max(math.max(p0x, p1x), p2x)))
 	min_y := int(math.floor(math.min(math.min(p0y, p1y), p2y)))
 	max_y := int(math.ceil(math.max(math.max(p0y, p1y), p2y)))
 
+	// Edge functions advance by a constant per pixel. Incremental evaluation
+	// replaces six multiplies and six subtractions per fragment with three adds.
+	dx0 := p2y - p1y
+	dy0 := -(p2x - p1x)
+	dx1 := p0y - p2y
+	dy1 := -(p0x - p2x)
+	dx2 := p1y - p0y
+	dy2 := -(p1x - p0x)
+	sx := f32(min_x) + 0.5
+	sy := f32(min_y) + 0.5
+	w0_start := (sx - p1x) * dx0 - (sy - p1y) * (p2x - p1x)
+	w1_start := (sx - p2x) * dx1 - (sy - p2y) * (p0x - p2x)
+	w2_start := (sx - p0x) * dx2 - (sy - p0y) * (p1x - p0x)
+
 	for y in min_y .. max_y + 1 {
+		row_offset := f32(y - min_y)
+		wy0 := w0_start + row_offset * dy0
+		wy1 := w1_start + row_offset * dy1
+		wy2 := w2_start + row_offset * dy2
+		mut ex0 := wy0
+		mut ex1 := wy1
+		mut ex2 := wy2
 		for x in min_x .. max_x + 1 {
+			w0 := ex0
+			w1 := ex1
+			w2 := ex2
+			ex0 += dx0
+			ex1 += dx1
+			ex2 += dx2
 			if x < 0 || y < 0 || x >= frame.width || y >= frame.height {
 				continue
 			}
 			if !in_scissor(sc, x, y) {
 				continue
 			}
-			px := f32(x) + 0.5
-			py := f32(y) + 0.5
-			w0 := (px - p1x) * (p2y - p1y) - (py - p1y) * (p2x - p1x)
-			w1 := (px - p2x) * (p0y - p2y) - (py - p2y) * (p0x - p2x)
-			w2 := (px - p0x) * (p1y - p0y) - (py - p0y) * (p1x - p0x)
 			inside := if area > 0 {
 				w0 <= 0 && w1 <= 0 && w2 <= 0
 			} else {
@@ -322,13 +351,10 @@ fn rasterize_tri(mut frame Frame, st &State, cmd Command, uni Uniform, vp Viewpo
 				vv = (iw0w * v0.v + iw1w * v1.v + iw2w * v2.v) / inv_w
 			}
 
-			c0 := v0.rgba
-			c1 := v1.rgba
-			c2 := v2.rgba
-			r := unpack_r(c0) * bw0 + unpack_r(c1) * bw1 + unpack_r(c2) * bw2
-			g := unpack_g(c0) * bw0 + unpack_g(c1) * bw1 + unpack_g(c2) * bw2
-			b := unpack_b(c0) * bw0 + unpack_b(c1) * bw1 + unpack_b(c2) * bw2
-			a := unpack_a(c0) * bw0 + unpack_a(c1) * bw1 + unpack_a(c2) * bw2
+			r := r0 * bw0 + r1 * bw1 + r2 * bw2
+			g := g0 * bw0 + g1 * bw1 + g2 * bw2
+			b := b0 * bw0 + b1 * bw1 + b2 * bw2
+			a := a0 * bw0 + a1 * bw1 + a2 * bw2
 
 			mut tex_color := u32(0xffffffff)
 			if cmd.image.id != 0 && cmd.image.id != st.def_img.id {
