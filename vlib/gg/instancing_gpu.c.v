@@ -20,10 +20,12 @@ pub fn (ctx &Context) draw_mesh_instanced(mesh &Mesh3D, instances []Instance3D) 
 	if !mesh.valid() || instances.len == 0 {
 		return false
 	}
+	// One scratch buffer for every instance: allocating it per instance made
+	// large batches spend most of their time in the allocator.
+	mut world := []Vec3{len: mesh.vertices.len}
 	ctx.r.begin_triangles()
 	for inst in instances {
 		basis := rotation_basis(inst.rotation)
-		mut world := []Vec3{len: mesh.vertices.len}
 		for i, local in mesh.vertices {
 			v := apply_basis(local, basis)
 			world[i] = Vec3{inst.pos.x + v.x * inst.scale.x, inst.pos.y + v.y * inst.scale.y, inst.pos.z + v.z * inst.scale.z}
