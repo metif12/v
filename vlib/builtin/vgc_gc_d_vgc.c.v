@@ -246,15 +246,19 @@ fn vgc_mark_roots() {
 // const, including the ones that are initialized at run time and point into the GC heap.
 // vgc's own globals are left out. They hold the bounds of the stacks and of the arenas, which
 // can be the address of an object (the first one in an arena that starts where a stack ends),
-// and the spans that the caches allocate from, but no pointer that the program holds. The only
-// objects that they keep alive are the tiny blocks, which vgc_mark_roots marks itself.
+// the spans that the caches allocate from, and the span-lookup cache (whose base slot holds a
+// span base address, i.e. the address of the span's first object), but no pointer that the
+// program holds. The only objects that they keep alive are the tiny blocks, which
+// vgc_mark_roots marks itself.
 fn vgc_mark_data_segments() {
 	mut lo := [16]uint{}
 	mut hi := [16]uint{}
 	n := C.vgc_data_ranges(&lo[0], &hi[0], 16)
-	skip_lo := [uint(&vgc_heap), uint(&vgc_arena_lo), uint(&vgc_arena_hi)]!
+	skip_lo := [uint(&vgc_heap), uint(&vgc_arena_lo), uint(&vgc_arena_hi), uint(&vgc_span_cache_base),
+		uint(&vgc_span_cache_size), uint(&vgc_span_cache_span)]!
 	skip_hi := [uint(&vgc_heap) + sizeof(VGC_Heap), uint(&vgc_arena_lo) + sizeof(uint),
-		uint(&vgc_arena_hi) + sizeof(uint)]!
+		uint(&vgc_arena_hi) + sizeof(uint), uint(&vgc_span_cache_base) + sizeof(uint),
+		uint(&vgc_span_cache_size) + sizeof(uint), uint(&vgc_span_cache_span) + sizeof(voidptr)]!
 	for i in 0 .. n {
 		vgc_scan_range_skipping(lo[i], hi[i], &skip_lo[0], &skip_hi[0], skip_lo.len)
 	}
