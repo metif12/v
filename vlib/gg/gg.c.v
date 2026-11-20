@@ -324,6 +324,10 @@ pub mut:
 	// Camera stored by set_camera(), used by begin_3d() and all 3D helpers
 	// that need a view direction (fog, billboards, picking).
 	camera Camera3D
+	// Custom shaders attached to Material3D values, keyed by material pointer.
+	material_shaders map[voidptr]gfx.Shader
+	// Pipelines created for each custom shader, keyed by shader id.
+	shader_pipelines map[u32]render.Pipeline
 }
 
 fn gg_init_sokol_window(user_data voidptr) {

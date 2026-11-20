@@ -51,12 +51,11 @@ pub fn (ctx &Context) draw_material_mesh_s(mesh &Mesh3D, pos Vec3, rotation Vec3
 			uvs << 0
 		}
 	}
+	mut custom := false
 	if !isnil(mat.texture) && (mat.texture.simg_ok || mat.texture.data != unsafe { nil }) {
 		img := mat.texture
 		cpu_id := register_cpu_image(ctx, img)
-		if ctx.pipeline != unsafe { nil } {
-			ctx.r.load_pipeline(ctx.pipeline.depth_alpha)
-		}
+		custom = load_mat_pipeline(ctx, mat)
 		if img.simg_ok && ctx.pipeline != unsafe { nil } {
 			ctx.r.texture(img.simg, img.ssmp)
 		} else {
@@ -69,17 +68,17 @@ pub fn (ctx &Context) draw_material_mesh_s(mesh &Mesh3D, pos Vec3, rotation Vec3
 		}
 		ctx.r.end()
 		ctx.r.disable_texture()
-		if ctx.pipeline != unsafe { nil } {
-			ctx.r.load_default_pipeline()
-		}
+		restore_mat_pipeline(ctx, custom)
 		return true
 	}
+	custom = load_mat_pipeline(ctx, mat)
 	ctx.r.begin_triangles()
 	for i, v in verts {
 		c := colors[i]
 		ctx.r.v3f_c4b(v.x, v.y, v.z, c.r, c.g, c.b, c.a)
 	}
 	ctx.r.end()
+	restore_mat_pipeline(ctx, custom)
 	return true
 }
 
