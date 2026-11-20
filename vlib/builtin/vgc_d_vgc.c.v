@@ -73,7 +73,7 @@ const vgc_arena_size = 64 * 1024 * 1024 // 64MB per arena (an object larger than
 // Smallest heap goal: lets the first collections happen early so garbage is recycled
 // into spans instead of piling into fresh arenas. Go's controller starts at 4 MiB;
 // vgc keeps a larger floor because every cycle walks all spans and recommits pages.
-const vgc_min_heap_goal = 16 * 1024 * 1024
+const vgc_min_heap_goal = 64 * 1024 * 1024
 // The arena map finds the arena of an address in constant time, however many arenas there are.
 // It cuts the address space into granules of 64 MB, the smallest arena size, so a granule
 // overlaps at most two arenas: one that ends in it and one that starts in it. It covers the low
