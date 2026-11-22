@@ -63,6 +63,7 @@ mut:
 // prepare_collect collects `a`, the code parsed so far, and keeps what
 // collect_continue needs to collect the code parsed after it. False when the
 // prepared code has diagnostics of its own: a check reports those in order.
+@[unsafe]
 pub fn (mut tc TypeChecker) prepare_collect(a &flat.FlatAst) bool {
 	mut prepared := &PreparedCollect{}
 	tc.prepared_collect = prepared
@@ -308,7 +309,11 @@ pub fn (mut tc TypeChecker) collect_continue(a &flat.FlatAst) bool {
 	// The user's code comes right after builtin in the logical order, so a
 	// loop that carries the module from file to file enters it from builtin.
 	start_module := 'builtin'
-	if tc.enclosing_generic_param_masks.len < n {
+	if tc.enclosing_generic_param_ranges.nodes > 0 {
+		if tc.enclosing_generic_param_ranges.nodes < n {
+			tc.enclosing_generic_param_ranges.nodes = n
+		}
+	} else if tc.enclosing_generic_param_masks.len < n {
 		tc.enclosing_generic_param_masks << []u32{len: n - tc.enclosing_generic_param_masks.len}
 	}
 	tc.index_enclosing_generic_params(a, new_entries)

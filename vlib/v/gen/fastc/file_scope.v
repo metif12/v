@@ -9,6 +9,7 @@ mut:
 	scope voidptr
 }
 
+@[unsafe]
 fn (mut scratch FastcFileScratch) generate(ctx &FastcFileGenContext, source FastcSourceFile) FastcFileGenOutput {
 	$if prealloc {
 		if scratch.scope == unsafe { nil }
@@ -23,6 +24,7 @@ fn (mut scratch FastcFileScratch) generate(ctx &FastcFileGenContext, source Fast
 	return fastc_generate_single_file(ctx, source)
 }
 
+@[unsafe]
 fn (mut scratch FastcFileScratch) free() {
 	$if prealloc {
 		if scratch.scope != unsafe { nil } {
@@ -72,6 +74,7 @@ fn fastc_clone_file_gen_output(output &FastcFileGenOutput) FastcFileGenOutput {
 		refs:              output.refs.clone()
 		root_refs:         output.root_refs.clone()
 		has_main_entry:    output.has_main_entry
+		export_prototypes: fastc_clone_output_strings(output.export_prototypes)
 		fixed_array_types: output.fixed_array_types.clone_owned()
 		composite_types:   fastc_clone_output_bool_map(output.composite_types)
 		spawn_typedefs:    fastc_clone_output_string_map(output.spawn_typedefs)

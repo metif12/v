@@ -7,13 +7,23 @@ const warn_allocs_tests_dir = os.dir(@FILE)
 const warn_allocs_v3_dir = os.dir(warn_allocs_tests_dir)
 const warn_allocs_vlib_dir = os.dir(warn_allocs_v3_dir)
 const warn_allocs_v3_src = os.join_path(warn_allocs_v3_dir, 'v.v')
+const warn_allocs_compiler_dir = os.join_path(os.vtmp_dir(), 'v3_warn_allocs_compiler_${os.getpid()}')
+const v3_bin = os.join_path(warn_allocs_compiler_dir, 'v3_warn_allocs' + $if windows {
+	'.exe'
+} $else {
+	''
+})
 
-fn build_warn_allocs_v3(root string) string {
-	bin := os.join_path(root, 'v3_warn_allocs')
+fn testsuite_begin() {
+	os.rmdir_all(warn_allocs_compiler_dir) or {}
+	os.mkdir_all(warn_allocs_compiler_dir)!
 	result := cmdexec.run(warn_allocs_vexe, ['-gc', 'none', '-path',
-		'${warn_allocs_vlib_dir}|@vlib|@vmodules', '-o', bin, warn_allocs_v3_src])
+		'${warn_allocs_vlib_dir}|@vlib|@vmodules', '-o', v3_bin, warn_allocs_v3_src])
 	assert result.exit_code == 0, result.output
-	return bin
+}
+
+fn testsuite_end() {
+	os.rmdir_all(warn_allocs_compiler_dir) or {}
 }
 
 fn run_warn_allocs_process(program string, args []string, environment map[string]string) os.Result {
@@ -36,6 +46,7 @@ fn run_warn_allocs_process(program string, args []string, environment map[string
 // interface without a cast, slices that copy, and locals lowering moves to
 // the heap. They were the leaks -warn-about-allocs missed in a kernel built
 // with -gc none.
+@[unsafe]
 fn test_warn_about_allocs_reports_implicit_allocations() {
 	root := os.join_path(os.vtmp_dir(), 'v3_warn_allocs_implicit_${os.getpid()}')
 	os.rmdir_all(root) or {}
@@ -43,7 +54,6 @@ fn test_warn_about_allocs_reports_implicit_allocations() {
 	defer {
 		os.rmdir_all(root) or {}
 	}
-	v3_bin := build_warn_allocs_v3(root)
 	source := os.join_path(root, 'main.v')
 	os.write_file(source, "interface Resource {
 mut:
@@ -175,7 +185,6 @@ fn test_warn_about_allocs_reports_casts_multi_returns_and_expanded_locals() {
 	defer {
 		os.rmdir_all(root) or {}
 	}
-	v3_bin := build_warn_allocs_v3(root)
 	source := os.join_path(root, 'main.v')
 	os.write_file(source, "interface Speaker {
 	speak() string
@@ -297,7 +306,6 @@ fn test_warn_about_allocs_reports_v1_allocation_sites() {
 	defer {
 		os.rmdir_all(root) or {}
 	}
-	v3_bin := build_warn_allocs_v3(root)
 	source := os.join_path(root, 'main.v')
 	os.write_file(source, "type Name = string
 

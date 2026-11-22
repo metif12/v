@@ -52,6 +52,7 @@ struct ParseChunkArgs {
 	worker        voidptr // &Parser
 	paths_ptr     voidptr // &[]string
 	starts_ptr    voidptr // &[]int (worker-local starts; the master shifts them on merge)
+	flags_ptr     voidptr // &[]u8 (what Parser.file_scan_hook answers for each file)
 	prepass_chunk voidptr // &ComptimeConstPrepassChunk
 	batch         voidptr // &BatchSources
 	chunk_index   int
@@ -101,7 +102,7 @@ fn (base &ParsePrefixBase) state_before(chunk_index int) (map[string]string, map
 // parse_chunk_thread parses one worker's contiguous range of files into the
 // worker's private FlatAst, recording each file's worker-local first node id
 // into its own preallocated slot of the shared starts array.
-@[direct_array_access]
+@[direct_array_access; unsafe]
 fn parse_chunk_thread(arg voidptr) voidptr {
 	mut a := unsafe { &ParseChunkArgs(arg) }
 	mut w := unsafe { &Parser(a.worker) }
@@ -113,18 +114,36 @@ fn parse_chunk_thread(arg voidptr) voidptr {
 	paths := unsafe { &[]string(a.paths_ptr) }
 	mut starts := unsafe { &[]int(a.starts_ptr) }
 	batch := unsafe { &BatchSources(a.batch) }
+	mut scan_flags := unsafe { &[]u8(a.flags_ptr) }
 	w.begin_text_cache_batch(a.end - a.start)
 	for i in a.start .. a.end {
+		first_node := w.a.nodes.len
 		unsafe {
-			(*starts)[i] = w.a.nodes.len
+			(*starts)[i] = first_node
 		}
 		w.parse_into_source((*paths)[i], batch.source_at(i) or { '' })
+		if !isnil(w.file_scan_hook) {
+			// The nodes of the file are still in this thread's cache; a later pass
+			// over the merged tree would read them from memory again.
+			unsafe {
+				(*scan_flags)[i] = w.file_scan_hook(w.a, first_node, w.a.nodes.len)
+			}
+		}
+	}
+	if a.scope != unsafe { nil } {
+		// The merge rebinds the texts of this chunk through a cache of this arena.
+		w.merge_text_cache = if isnil(w.text_value_cache) {
+			flat.new_text_probe_cache()
+		} else {
+			w.text_value_cache
+		}
 	}
 	w.end_text_cache_batch()
 	parser_worker_scope_leave(a.scope)
 	return unsafe { nil }
 }
 
+@[unsafe]
 fn precollect_const_chunk_thread(arg voidptr) voidptr {
 	mut a := unsafe { &ParseChunkArgs(arg) }
 	a.scope = parser_worker_scope_begin(a.scope_enabled)
@@ -138,6 +157,7 @@ fn precollect_const_chunk_thread(arg voidptr) voidptr {
 	return unsafe { nil }
 }
 
+@[unsafe]
 fn precollect_const_names_chunk_thread(arg voidptr) voidptr {
 	mut a := unsafe { &ParseChunkArgs(arg) }
 	mut w := unsafe { &Parser(a.worker) }
@@ -176,6 +196,7 @@ fn clone_comptime_const_prepass_decls(values []ComptimeConstPrepassDecl) []Compt
 	return cloned
 }
 
+@[unsafe]
 fn parser_worker_scope_begin(enabled bool) voidptr {
 	$if prealloc {
 		if enabled {
@@ -185,6 +206,7 @@ fn parser_worker_scope_begin(enabled bool) voidptr {
 	return unsafe { nil }
 }
 
+@[unsafe]
 fn parser_worker_scope_leave(scope voidptr) {
 	$if prealloc {
 		if scope != unsafe { nil } {
@@ -193,6 +215,7 @@ fn parser_worker_scope_leave(scope voidptr) {
 	}
 }
 
+@[unsafe]
 fn parser_worker_scope_free(scope voidptr) {
 	$if prealloc {
 		if scope != unsafe { nil } {
@@ -210,7 +233,7 @@ fn (p &Parser) timing_profile(message string) {
 // parse_files_dispatch parses paths in order, appending to p.a exactly like a
 // serial parse_into loop, across worker threads when there is enough work.
 // Returns each file's first node id in p.a and whether threads were used.
-@[direct_array_access]
+@[direct_array_access; unsafe]
 pub fn (mut p Parser) parse_files_dispatch(paths []string, allow_parallel bool) ([]int, bool) {
 	previous_paths := p.parse_batch_paths
 	p.parse_batch_paths = paths.clone()
@@ -295,6 +318,7 @@ pub fn (mut p Parser) parse_files_dispatch(paths []string, allow_parallel bool) 
 	mut previous_const_names := p.comptime_string_consts.clone()
 	dispatch_file_id_start := p.next_file_id
 	mut starts := []int{len: all_paths.len}
+	mut scan_flags := []u8{len: all_paths.len}
 	mut prepass_chunks := []&ComptimeConstPrepassChunk{cap: n_chunks}
 	for _ in 0 .. n_chunks {
 		prepass_chunks << &ComptimeConstPrepassChunk{}
@@ -312,6 +336,7 @@ pub fn (mut p Parser) parse_files_dispatch(paths []string, allow_parallel bool) 
 		w.quick_source_sums = p.quick_source_sums
 		w.no_source_digests = p.no_source_digests
 		w.keep_source_texts = p.keep_source_texts
+		w.file_scan_hook = p.file_scan_hook
 		if p.preloaded_sources.len > 0 {
 			// The workers only read the table, and the texts stay with the master.
 			w.preloaded_sources = p.preloaded_sources.clone()
@@ -347,6 +372,7 @@ pub fn (mut p Parser) parse_files_dispatch(paths []string, allow_parallel bool) 
 		worker:        voidptr(p)
 		paths_ptr:     unsafe { voidptr(&all_paths) }
 		starts_ptr:    unsafe { voidptr(&starts) }
+		flags_ptr:     unsafe { voidptr(&scan_flags) }
 		prepass_chunk: voidptr(prepass_chunks[0])
 		batch:         voidptr(batch)
 		start:         bounds[0]
@@ -359,6 +385,7 @@ pub fn (mut p Parser) parse_files_dispatch(paths []string, allow_parallel bool) 
 			worker:        voidptr(parser_workers[ci])
 			paths_ptr:     unsafe { voidptr(&all_paths) }
 			starts_ptr:    unsafe { voidptr(&starts) }
+			flags_ptr:     unsafe { voidptr(&scan_flags) }
 			prepass_chunk: voidptr(prepass_chunks[ci + 1])
 			batch:         voidptr(batch)
 			chunk_index:   ci + 1
@@ -484,6 +511,21 @@ pub fn (mut p Parser) parse_files_dispatch(paths []string, allow_parallel bool) 
 		arg:        unsafe { voidptr(&args[0]) }
 		force_sync: true
 	}
+	// The merges of this batch and of the one parsed ahead copy into the unused
+	// capacity of the caller's arrays: make that resident meanwhile, behind the
+	// chunks that the workers start with (see merge_prefault_thread).
+	mut prefaults := p.merge_prefault_ranges(total_bytes + next_bytes)
+	for pi in 0 .. prefaults.len {
+		prefault_task := workers.Task{
+			run: merge_prefault_thread
+			arg: unsafe { voidptr(&prefaults[pi]) }
+		}
+		if tasks.len > p.a.worker_pool.size() {
+			tasks.insert(p.a.worker_pool.size() - 1, prefault_task)
+		} else {
+			tasks.insert(0, prefault_task)
+		}
+	}
 	// The chunks share what each sibling file adds to the sizeof declaration
 	// tables. The table grows in the chunks' arenas, so drop it with the pool.
 	sizeof_shared := TranslatedSizeofShared.new()
@@ -548,6 +590,11 @@ pub fn (mut p Parser) parse_files_dispatch(paths []string, allow_parallel bool) 
 			args:              args[n_own_chunks..].clone()
 			bounds:            next_bounds
 			starts:            starts[paths.len..].clone()
+			scan_flags:        if isnil(p.file_scan_hook) {
+				[]u8{}
+			} else {
+				scan_flags[paths.len..].clone()
+			}
 			batch:             batch
 			batch_start:       paths.len
 			first_file_id:     dispatch_file_id_start + paths.len
@@ -559,10 +606,56 @@ pub fn (mut p Parser) parse_files_dispatch(paths []string, allow_parallel bool) 
 			keep_source_texts: p.keep_source_texts
 		})
 		starts = starts[..paths.len].clone()
+		scan_flags = scan_flags[..paths.len].clone()
 	}
+	p.batch_scan_flags = if isnil(p.file_scan_hook) { []u8{} } else { scan_flags }
 	ahead := if next_paths.len > 0 { ', ahead: ${next_paths.len}' } else { '' }
 	p.timing_profile('  [ttime]   pp dispatch      ${f64(pdsw.elapsed().microseconds()) / 1000.0:7.2f} ms (files: ${paths.len}${ahead})')
 	return starts, any_started
+}
+
+// merge_prefault_nodes_per_kb is a low estimate of the nodes that a parse makes
+// of 1024 source bytes (the compiler's own sources make about 120): the merge
+// of a parallel parse fills at least that much of the caller's arrays.
+const merge_prefault_nodes_per_kb = 112
+
+// merge_prefault_min_bytes is the batch size from which the capacity that its
+// merge fills is made resident ahead of it.
+const merge_prefault_min_bytes = 1048576
+
+// merge_prefault_ranges returns the unused capacity of the caller's node and
+// children arrays that the merges of a batch of `source_bytes` will fill, for
+// merge_prefault_thread: nothing unless the arrays hold that capacity already
+// (the self-host reserves its whole tree), since an array that grows moves.
+fn (p &Parser) merge_prefault_ranges(source_bytes i64) []MergePrefaultArgs {
+	mut ranges := []MergePrefaultArgs{}
+	$if prealloc {
+		if source_bytes < merge_prefault_min_bytes {
+			return ranges
+		}
+		estimate := int(source_bytes / 1024 * merge_prefault_nodes_per_kb)
+		// Twice the estimate fits: the caller's own chunk, which is appended while
+		// the task runs, then cannot make either array move under it.
+		if p.a.nodes.cap - p.a.nodes.len >= estimate * 2 {
+			unsafe {
+				start := &u8(p.a.nodes.data) + p.a.nodes.len * int(sizeof(flat.Node))
+				ranges << MergePrefaultArgs{
+					start: voidptr(start)
+					end:   voidptr(start + estimate * int(sizeof(flat.Node)))
+				}
+			}
+		}
+		if p.a.children.cap - p.a.children.len >= estimate * 2 {
+			unsafe {
+				start := &u8(p.a.children.data) + p.a.children.len * int(sizeof(flat.NodeId))
+				ranges << MergePrefaultArgs{
+					start: voidptr(start)
+					end:   voidptr(start + estimate * int(sizeof(flat.NodeId)))
+				}
+			}
+		}
+	}
+	return ranges
 }
 
 // SpeculatedBatch is the parse of the files that the caller expected in its
@@ -581,6 +674,8 @@ mut:
 	bounds []int
 	// The worker-local first node of each file.
 	starts []int
+	// What Parser.file_scan_hook answered for each file; empty without a hook.
+	scan_flags []u8
 	// The sources of both batches; those of `paths` start at `batch_start`.
 	batch       &BatchSources = unsafe { nil }
 	batch_start int
@@ -738,6 +833,7 @@ fn (mut p Parser) merge_speculated_batch(paths []string) ?[]int {
 		}
 	}
 	p.next_file_id = next_chunk_file_id
+	p.batch_scan_flags = spec.scan_flags
 	p.timing_profile('  [ttime]   pp ahead merge   ${f64(sw.elapsed().microseconds()) / 1000.0:7.2f} ms (files: ${paths.len})')
 	return starts
 }
@@ -1539,6 +1635,11 @@ struct ParseMergeCopyArgs {
 	node_offset  int
 	child_offset int
 	has_scope    bool
+	// The sources that the worker parsed: the files at [batch_start, batch_end)
+	// of `batch` (&BatchSources).
+	batch       voidptr
+	batch_start int
+	batch_end   int
 mut:
 	miss_nodes    []int
 	pending_files []PendingSourceFile
@@ -1555,7 +1656,7 @@ mut:
 // probe_worker_texts_thread marks the texts of one worker's table that the
 // master's text table does not hold. Nothing writes the master table while the
 // probes run.
-@[direct_array_access]
+@[direct_array_access; unsafe]
 fn probe_worker_texts_thread(arg voidptr) voidptr {
 	mut probe := unsafe { &MergeTextProbeArgs(arg) }
 	p := unsafe { &Parser(probe.master) }
@@ -1577,7 +1678,7 @@ fn new_parse_merge_text_cache() &flat.TextProbeCache {
 // serial merge. Chunks write disjoint master ranges, so the copies run
 // concurrently; string payloads stay in the worker scopes until the serial
 // intern pass rebinds them.
-@[direct_array_access]
+@[direct_array_access; unsafe]
 fn parse_merge_copy_thread(arg voidptr) voidptr {
 	mut ma := unsafe { &ParseMergeCopyArgs(arg) }
 	mut p := unsafe { &Parser(ma.master) }
@@ -1592,11 +1693,21 @@ fn parse_merge_copy_thread(arg voidptr) voidptr {
 			cid
 		}
 	}
-	mut value_cache := new_parse_merge_text_cache()
+	// A scoped worker left a cache in its arena, which is released after the
+	// merge: one allocated here would stay in this pool thread's arena for good.
+	mut value_cache := w.merge_text_cache
+	owns_value_cache := isnil(value_cache)
+	if owns_value_cache {
+		value_cache = new_parse_merge_text_cache()
+	} else {
+		value_cache.reset()
+	}
 	defer {
-		// Only the buffers are owned here; their strings borrow the master AST.
-		unsafe {
-			free(value_cache)
+		if owns_value_cache {
+			// Only the buffers are owned here; their strings borrow the master AST.
+			unsafe {
+				free(value_cache)
+			}
 		}
 	}
 	for k in 0 .. w.a.nodes.len {
@@ -1654,13 +1765,24 @@ fn parse_merge_copy_thread(arg voidptr) voidptr {
 		// A source file does not necessarily have a matching source buffer:
 		// template parsing stores the generated V source separately from the
 		// real template file registered for diagnostic remapping.
+		mut batch := unsafe { &BatchSources(ma.batch) }
 		for file_id, file in w.a.source_files {
 			// The text goes with the line table: both leave the worker's arena here.
+			// The text of a file is the buffer that the batch read, which the batch
+			// then leaves to the table of kept texts; any other text (a template's
+			// generated source, a file read by the worker) is in the arena and copied.
 			has_text := file_id in w.a.source_texts
+			mut text := ''
+			if has_text {
+				text = w.a.source_texts[file_id]
+				if isnil(batch) || !batch.keep_text(text, ma.batch_start, ma.batch_end) {
+					text = text.clone()
+				}
+			}
 			ma.pending_files << PendingSourceFile{
 				file_id:  file_id
 				file:     clone_parser_source_file(file)
-				text:     if has_text { w.a.source_texts[file_id].clone() } else { '' }
+				text:     text
 				has_text: has_text
 			}
 		}
@@ -1681,7 +1803,7 @@ fn par_parse_merge_enabled() bool {
 // disjoint ranges across the pool, then the order-sensitive tail (interning,
 // exports, diagnostics) runs serially in chunk order exactly like the serial
 // merge.
-@[direct_array_access]
+@[direct_array_access; unsafe]
 fn (mut p Parser) merge_parsed_workers_parallel(mut parser_workers []&Parser, mut starts []int, bounds []int, mut args []ParseChunkArgs) {
 	thread_count := parser_workers.len
 	base_nodes := p.a.nodes.len
@@ -1699,6 +1821,7 @@ fn (mut p Parser) merge_parsed_workers_parallel(mut parser_workers []&Parser, mu
 	// every payload without leaving a serial per-node miss pass behind. The pool
 	// first marks the texts the master table lacks; a text it holds already
 	// stays as it is, so only the marked ones go through the ordered inserts.
+	pmsw := time.new_stopwatch()
 	mut probes := []MergeTextProbeArgs{cap: thread_count}
 	for worker in parser_workers {
 		probes << MergeTextProbeArgs{
@@ -1716,6 +1839,7 @@ fn (mut p Parser) merge_parsed_workers_parallel(mut parser_workers []&Parser, mu
 		}
 	}
 	p.a.worker_pool.run(probe_tasks)
+	pm_probe_us := pmsw.elapsed().microseconds()
 	mut text_headroom := 0
 	for probe in probes {
 		for missing in probe.missing {
@@ -1733,6 +1857,7 @@ fn (mut p Parser) merge_parsed_workers_parallel(mut parser_workers []&Parser, mu
 			}
 		}
 	}
+	pm_intern_us := pmsw.elapsed().microseconds()
 	unsafe {
 		p.a.nodes.grow_len(node_offsets[thread_count] - base_nodes)
 		p.a.children.grow_len(child_offsets[thread_count] - base_children)
@@ -1745,6 +1870,9 @@ fn (mut p Parser) merge_parsed_workers_parallel(mut parser_workers []&Parser, mu
 			node_offset:  node_offsets[ci]
 			child_offset: child_offsets[ci]
 			has_scope:    args[ci + 1].scope != unsafe { nil }
+			batch:        args[ci + 1].batch
+			batch_start:  args[ci + 1].start
+			batch_end:    args[ci + 1].end
 			miss_nodes:   []int{cap: 4096}
 		}
 	}
@@ -1757,10 +1885,19 @@ fn (mut p Parser) merge_parsed_workers_parallel(mut parser_workers []&Parser, mu
 		}
 	}
 	p.a.worker_pool.run(tasks)
+	pm_copy_us := pmsw.elapsed().microseconds()
+	// One cache serves every chunk of every merge: the texts that it maps stay
+	// where they are until the worker arenas are released below.
+	if isnil(p.merge_text_cache) {
+		p.merge_text_cache = flat.new_text_probe_cache()
+	} else {
+		p.merge_text_cache.reset()
+	}
 	for ci in 0 .. thread_count {
-		p.a.intern_node_texts_at(margs[ci].miss_nodes)
+		p.a.intern_node_texts_at_cached(margs[ci].miss_nodes, mut p.merge_text_cache)
 		p.merge_parsed_worker_bookkeeping(mut *parser_workers[ci], mut starts, bounds[ci + 1], bounds[ci + 2], args[ci + 1].scope, node_offsets[ci], margs[ci].pending_files, margs[ci].has_scope)
 	}
+	pm_tail_us := pmsw.elapsed().microseconds()
 	// Unmapping the worker arenas is most of the merge when done in a row; the
 	// pool releases them side by side.
 	mut free_tasks := []workers.Task{cap: thread_count}
@@ -1774,8 +1911,13 @@ fn (mut p Parser) merge_parsed_workers_parallel(mut parser_workers []&Parser, mu
 		}
 	}
 	p.a.worker_pool.run(free_tasks)
+	if p.prefs.verbose {
+		pm_free_us := pmsw.elapsed().microseconds()
+		p.timing_profile('  [ttime]     pm probe ${f64(pm_probe_us) / 1000.0:.2f} ms, intern ${f64(pm_intern_us - pm_probe_us) / 1000.0:.2f} ms (texts: ${text_headroom}), copy ${f64(pm_copy_us - pm_intern_us) / 1000.0:.2f} ms, tail ${f64(pm_tail_us - pm_copy_us) / 1000.0:.2f} ms, free ${f64(pm_free_us - pm_tail_us) / 1000.0:.2f} ms (chunks: ${thread_count})')
+	}
 }
 
+@[unsafe]
 fn parser_worker_scope_free_thread(scope voidptr) voidptr {
 	parser_worker_scope_free(scope)
 	return unsafe { nil }
@@ -1847,7 +1989,7 @@ fn (mut p Parser) merge_parsed_worker_tail(mut w Parser, mut starts []int, chunk
 	p.merge_parsed_worker_bookkeeping(mut w, mut starts, chunk_start, chunk_end, worker_scope, node_shift, [], false)
 }
 
-@[direct_array_access]
+@[direct_array_access; unsafe]
 fn (mut p Parser) merge_parsed_worker_bookkeeping(mut w Parser, mut starts []int, chunk_start int, chunk_end int, worker_scope voidptr, node_shift int, pending_files []PendingSourceFile, use_pending bool) {
 	// Per-file region starts move by the merge offset.
 	for i in chunk_start .. chunk_end {

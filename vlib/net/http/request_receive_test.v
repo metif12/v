@@ -49,6 +49,7 @@ fn receive_all_data_progress_body_cb(request &Request, chunk []u8, body_so_far u
 	capture.statuses << status_code
 }
 
+@[unsafe]
 fn test_receive_all_data_from_cb_in_builder_propagates_non_eof_errors() {
 	mut req := Request{}
 	mut content := strings.new_builder(64)
@@ -60,6 +61,7 @@ fn test_receive_all_data_from_cb_in_builder_propagates_non_eof_errors() {
 	panic('expected a timeout error')
 }
 
+@[unsafe]
 fn test_receive_all_data_from_cb_in_builder_stops_on_eof() {
 	mut req := Request{}
 	mut content := strings.new_builder(64)
@@ -289,13 +291,13 @@ fn test_download_preview_stays_bounded_for_large_brotli_body() ! {
 		eprintln('skipping large Brotli preview test; libbrotli is not available')
 		return
 	}
-	body := []u8{len: 32 * 1024 * 1024}
-	compressed := brotli.compress(body)!
+	// A pre-encoded 32 MiB zero body keeps the test focused on decoding the preview.
+	compressed := $embed_file('testdata/response_preview_32m_zeros.br').to_string()
 	assert compressed.len < 65536
-	wire := 'HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: ${compressed.len}\r\n\r\n${compressed.bytestr()}'
+	wire := 'HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: ${compressed.len}\r\n\r\n${compressed}'
 	resp := parse_received_response(wire, ReceivedResponseInfo{
 		stop_copying_limit: 65536
 	})!
 	assert resp.body.len == 65536
-	assert resp.body.bytes() == body[..65536]
+	assert resp.body.bytes() == []u8{len: 65536}
 }

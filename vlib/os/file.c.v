@@ -42,6 +42,8 @@ fn fix_windows_path(path string) string {
 }
 
 // open_file tries to open or create a file with custom flags and permissions.
+// On Unix-like systems the file is close-on-exec: programs started later do not
+// inherit it.
 @[noinline]
 pub fn open_file(path string, mode string, options ...int) !File {
 	mut flags := 0
@@ -111,7 +113,7 @@ pub fn open_file(path string, mode string, options ...int) !File {
 		fd := $if windows {
 			C._wopen(p.to_wide(), flags, permission)
 		} $else {
-			C.open(&char(p.str), flags, permission)
+			C.open(&char(p.str), flags | C.O_CLOEXEC, permission)
 		}
 		if fd == -1 {
 			return error_posix()
@@ -260,6 +262,7 @@ pub fn (f &File) eof() bool {
 }
 
 // reopen allows a `File` to be reused. It is mostly useful for reopening standard input and output.
+@[unsafe]
 pub fn (mut f File) reopen(path string, mode string) ! {
 	$if freestanding || syscalls {
 		// there is no FILE* stream to reattach to in -freestanding builds

@@ -1,10 +1,11 @@
 module builtin
 
-// panic_debug private function that V uses for panics, -cg/-g is passed
+// panic_debug private function that V uses for panics that know their V source
+// position: every `panic()` call with -g/-cg, and calls outside vlib in non-prod builds.
 // recent versions of tcc print nicer backtraces automatically
 // Note: the duplication here is because tcc_backtrace should be called directly
 // inside the panic functions.
-@[markused; noreturn]
+@[markused; noreturn; unsafe]
 fn panic_debug(line_no int, file string, mod string, fn_name string, s string) {
 	// Note: the order here is important for a stabler test output
 	// module is less likely to change than function, etc...
@@ -27,25 +28,38 @@ fn panic_debug(line_no int, file string, mod string, fn_name string, s string) {
 		// vfmt off
 		// Note: be carefull to not allocate here, avoid string interpolation
 		flush_stdout()
-		eprintln('================ V panic ================')
-		eprint('   module: '); eprintln(mod)
-		eprint(' function: '); eprint(fn_name); eprintln('()')
-		eprint('  message: '); eprintln(s)
-		eprint('     file: '); eprint(file); eprint(':');
-	    C.fprintf(C.stderr, c'%d\n', line_no)
-		eprint('   v hash: '); eprintln(vcurrent_hash())
-		$if !vinix {
-			eprint('      pid: '); C.fprintf(C.stderr, c'%p\n', voidptr(v_getpid()))
-			eprint('      tid: '); C.fprintf(C.stderr, c'%p\n', voidptr(v_gettid()))
+		$if debug {
+			eprintln('================ V panic ================')
+			eprint('   module: '); eprintln(mod)
+			eprint(' function: '); eprint(fn_name); eprintln('()')
+			eprint('  message: '); eprintln(s)
+			eprint('     file: '); eprint(file); eprint(':');
+			C.fprintf(C.stderr, c'%d\n', line_no)
+			eprint('   v hash: '); eprintln(vcurrent_hash())
+			$if !vinix {
+				eprint('      pid: '); C.fprintf(C.stderr, c'%p\n', voidptr(v_getpid()))
+				eprint('      tid: '); C.fprintf(C.stderr, c'%p\n', voidptr(v_gettid()))
+			}
+			eprintln('=========================================')
+		} $else {
+			// Without `-g`, only the panic call site knows its .v line.
+			eprint('V panic: '); eprintln(s)
+			eprint('     at: '); eprint(file); eprint(':');
+			C.fprintf(C.stderr, c'%d', line_no)
+			eprint(' in '); eprint(mod); eprint('.'); eprint(fn_name); eprintln('()')
+			eprint(' v hash: '); eprintln(vcurrent_hash())
+			$if !vinix {
+				eprint('    pid: '); C.fprintf(C.stderr, c'%p\n', voidptr(v_getpid()))
+				eprint('    tid: '); C.fprintf(C.stderr, c'%p\n', voidptr(v_gettid()))
+			}
 		}
-		eprintln('=========================================')
 		flush_stdout()
 		// vfmt on
 		$if exit_after_panic_message ? {
 			C.exit(1)
 		} $else $if no_backtrace ? {
 			C.exit(1)
-		} $else $if tinyc && (!glibc || arm64) {
+		} $else $if tinyc && !macos && (!glibc || arm64) {
 			$if panics_break_into_debugger ? {
 				break_if_debugger_attached()
 			} $else {
@@ -90,7 +104,7 @@ pub fn panic_result_not_set(s string) {
 // It also shows a backtrace on most platforms.
 // In a program that calls `recover()`, a panic first runs the pending `defer`
 // blocks up the stack, and one of them can stop it (see `recover`).
-@[noreturn]
+@[noreturn; unsafe]
 pub fn panic(s string) {
 	if g_panic_state.top != unsafe { nil } || g_panic_state.len > 0 {
 		panic_unwind(s, PanicDebugInfo{})
@@ -112,8 +126,10 @@ pub fn panic(s string) {
 		eprint(' v hash: ')
 		eprintln(vcurrent_hash())
 		$if !vinix {
-			eprint('    pid: '); C.fprintf(C.stderr, c'%p\n', voidptr(v_getpid()))
-			eprint('    tid: '); C.fprintf(C.stderr, c'%p\n', voidptr(v_gettid()))
+			$if !builtin_write_buf_to_fd_should_use_c_write ? {
+				eprint('    pid: '); C.fprintf(C.stderr, c'%p\n', voidptr(v_getpid()))
+				eprint('    tid: '); C.fprintf(C.stderr, c'%p\n', voidptr(v_gettid()))
+			}
 		}
 		flush_stdout()
 		// vfmt on
@@ -121,7 +137,7 @@ pub fn panic(s string) {
 			C.exit(1)
 		} $else $if no_backtrace ? {
 			C.exit(1)
-		} $else $if tinyc && (!glibc || arm64) {
+		} $else $if tinyc && !macos && (!glibc || arm64) {
 			$if panics_break_into_debugger ? {
 				break_if_debugger_attached()
 			} $else {

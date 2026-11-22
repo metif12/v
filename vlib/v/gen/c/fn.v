@@ -307,10 +307,19 @@ fn (mut g FlatGen) collect_fn_gen_items() []FlatFnGenItem {
 			idx:    i
 		})
 	}
-	keys = g.sorted_fn_gen_item_keys(keys)
-	unsorted := items.clone()
-	for i, key in keys {
+	sorted_keys := g.sorted_fn_gen_item_keys(keys)
+	mut unsorted := items.clone()
+	for i, key in sorted_keys {
 		items[i] = unsorted[key.idx]
+	}
+	// The candidate list, the unsorted copy and the key lists are spent, but the
+	// arena they are in can stay until cgen is done: give their pages back.
+	unsafe {
+		candidates.free()
+		unsorted.free()
+		keys.free()
+		preferred_fns.free()
+		candidate_preferred.free()
 	}
 	return items
 }
@@ -732,6 +741,7 @@ fn windows_gui_stdio_setup(force_console bool) string {
 	return '\tBOOL con_valid = FALSE;\n' + console_setup + '\tFILE* res_fp = 0;\n' + '\terrno_t err;\n' + '\tif (con_valid) {\n' + '\t\terr = freopen_s(&res_fp, "CON", "w", stdout);\n' + '\t\terr = freopen_s(&res_fp, "CON", "w", stderr);\n' + '\t} else {\n' + '\t\terr = freopen_s(&res_fp, "NUL", "w", stdout);\n' + '\t\terr = freopen_s(&res_fp, "NUL", "w", stderr);\n' + '\t}\n' + '\t(void)err;'
 }
 
+@[unsafe]
 fn (mut g FlatGen) c_main_declaration(force_main_console bool) string {
 	if g.target.os != 'windows' {
 		return 'int main(int argc, char** argv) {'
@@ -8046,16 +8056,30 @@ fn (mut g FlatGen) c_call_is_int_array_data_arg(arg_id flat.NodeId, arg_idx int,
 	return is_native_variadic
 }
 
-fn (mut g FlatGen) gen_builtin_panic_call(node flat.Node) {
+// panic_call_reports_position reports whether a `panic()` call passes its V source
+// position to the runtime. `-g` builds report every call. Other non-prod builds report
+// calls outside the compiler's vlib (and vlib's own `_test.v` files), so that a panic
+// names the user's .v line without debug info; `-prod` binaries keep no source paths.
+fn (g &FlatGen) panic_call_reports_position(filename string) bool {
 	if g.is_debug {
+		return true
+	}
+	return filename.ends_with('_test.v') || !g.c_source_file_is_in_vlib(filename)
+}
+
+fn (mut g FlatGen) gen_builtin_panic_call(node flat.Node) {
+	mut reported := false
+	if g.is_debug || !g.is_prod {
 		if position := g.a.source_position(node.pos) {
-			module_name := if g.tc.cur_module.len > 0 { g.tc.cur_module } else { 'main' }
-			fn_name := g.cur_fn_name.all_after_last('.')
-			g.write('panic_debug(${position.line}, _S("${c_escape(position.filename.replace('\\', '/'))}"), _S("${c_escape(module_name)}"), _S("${c_escape(fn_name)}"), ')
-		} else {
-			g.write('v_panic(')
+			if g.panic_call_reports_position(position.filename) {
+				module_name := if g.tc.cur_module.len > 0 { g.tc.cur_module } else { 'main' }
+				fn_name := g.cur_fn_name.all_after_last('.')
+				g.write('panic_debug(${position.line}, _S("${c_escape(position.filename.replace('\\', '/'))}"), _S("${c_escape(module_name)}"), _S("${c_escape(fn_name)}"), ')
+				reported = true
+			}
 		}
-	} else {
+	}
+	if !reported {
 		g.write('v_panic(')
 	}
 	if node.children_count > 1 {
@@ -12120,6 +12144,7 @@ fn (g &FlatGen) mut_param_name_may_match(name string) bool {
 
 // current_param_is_mut returns true when a current param originated from `mut name T`
 // and the identifier still resolves to that parameter (not a shadowing local).
+@[unsafe]
 fn (g &FlatGen) current_param_is_mut(name string) bool {
 	if g.cur_mut_params.len == 0 || !g.mut_param_name_may_match(name) {
 		return false
@@ -12141,6 +12166,7 @@ fn (g &FlatGen) current_param_is_mut_pointer(name string) bool {
 	return g.current_param_is_mut(name) && (g.cur_mut_pointer_params[name] or { false })
 }
 
+@[unsafe]
 fn (g &FlatGen) current_mut_param_binding_is_shadowed(name string) bool {
 	if g.cur_mut_params.len == 0 || !g.mut_param_name_may_match(name) {
 		return false
@@ -12479,6 +12505,7 @@ fn c_fn_lookup_has_explicit_name(name string, fallback string) bool {
 		|| fallback.contains('C__')
 }
 
+@[unsafe]
 fn (g &FlatGen) module_c_fn_param_types(name string, fallback string) ?[]types.Type {
 	if g.tc == unsafe { nil } || !c_fn_lookup_has_explicit_name(name, fallback) {
 		return none
@@ -12498,6 +12525,7 @@ fn (g &FlatGen) module_c_fn_param_types(name string, fallback string) ?[]types.T
 	return none
 }
 
+@[unsafe]
 fn (g &FlatGen) module_c_fn_variadic(name string, fallback string) ?bool {
 	if g.tc == unsafe { nil } {
 		return none
@@ -12561,6 +12589,7 @@ fn (g &FlatGen) fn_decl_variadic_entry(name string) ?bool {
 	return none
 }
 
+@[unsafe]
 fn (g &FlatGen) import_resolved_fn_decl_variadic(name string) ?bool {
 	if !name.contains('.') {
 		return none
@@ -12581,6 +12610,7 @@ fn (g &FlatGen) import_resolved_fn_decl_variadic(name string) ?bool {
 	return none
 }
 
+@[unsafe]
 fn (g &FlatGen) local_or_unique_short_fn_decl_variadic(name string) ?bool {
 	if g.tc != unsafe { nil } {
 		module_key := fn_decl_module_key(g.tc.cur_module, name)
@@ -13112,6 +13142,9 @@ fn (mut g FlatGen) gen_callback_fn_value_for_expected_c_abi(arg_id flat.NodeId, 
 			g.write(wrapper)
 			return true
 		}
+	} else if expected_c_abi.len == 0
+		&& g.gen_callback_closure_abi_adapter(arg_id, expected, false, true) {
+		return true
 	}
 	actual_fn := fn_type_from(g.usable_expr_type(arg_id)) or { return false }
 	if g.callback_fn_types_direct_compatible(actual_fn, expected_fn, expected_c_abi) {
@@ -13212,15 +13245,24 @@ fn (g &FlatGen) callback_closure_target(id flat.NodeId) ?CallbackClosureTarget {
 // while replacing its generated target with a C-ABI adapter. The executable closure
 // still carries the original context; only its jump target changes.
 fn (mut g FlatGen) gen_c_callback_closure_abi_adapter(arg_id flat.NodeId, expected types.Type, emit_cast bool) bool {
+	return g.gen_callback_closure_abi_adapter(arg_id, expected, true, emit_cast)
+}
+
+// gen_callback_closure_abi_adapter is gen_c_callback_closure_abi_adapter for a V
+// callback type when `c_abi` is false: a capturing literal that returns nothing,
+// passed where `fn (...) !` is expected, must be called through an adapter that
+// returns the result. A bare cast lets the caller read a result the literal never
+// wrote, and on x86-64 the caller's hidden result pointer becomes the first argument.
+fn (mut g FlatGen) gen_callback_closure_abi_adapter(arg_id flat.NodeId, expected types.Type, c_abi bool, emit_cast bool) bool {
 	expected_fn := fn_type_from(expected) or { return false }
 	target := g.callback_closure_target(arg_id) or { return false }
 	actual_fn := g.callback_fn_value_type(target.name) or { return false }
-	encoded := g.c_extern_fn_ptr_encoded_for_type(expected, expected_fn)
+	encoded := if c_abi { g.c_extern_fn_ptr_encoded_for_type(expected, expected_fn) } else { '' }
 	wrapper := g.ensure_callback_userdata_wrapper(target.name, actual_fn, expected_fn, encoded) or {
 		return false
 	}
 	if emit_cast {
-		mut expected_ct := encoded
+		mut expected_ct := if c_abi { encoded } else { g.tc.c_type(expected) }
 		if expected_ct.starts_with('fn_ptr:') {
 			expected_ct = g.resolve_fn_ptr_type(expected_ct)
 		}
@@ -18396,11 +18438,8 @@ fn (g &FlatGen) should_emit_c_extern_decl_from_file(cfn string, source_file stri
 		}
 	}
 	if g.target.os == 'vinix' {
-		normalized_file := source_file.replace('\\', '/')
 		normalized_root := g.compiler_vroot.replace('\\', '/').trim_right('/')
-		is_vlib_file := normalized_root.len > 0
-			&& normalized_file.starts_with('${normalized_root}/vlib/')
-		if !is_vlib_file {
+		if vlib_relative_source_path(normalized_root, source_file) == none {
 			if cfn.starts_with('__builtin_') {
 				return false
 			}

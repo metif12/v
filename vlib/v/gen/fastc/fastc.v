@@ -338,6 +338,7 @@ const fastc_c_reserved_identifiers = {
 	'char':     true
 	'const':    true
 	'continue': true
+	'complex':  true
 	'default':  true
 	'do':       true
 	'double':   true
@@ -1313,6 +1314,19 @@ pub mut:
 	// group of complete definitions begins. Every unit declares them, so a
 	// build that shares one parse of the head may spread them over its units.
 	solo_starts []int
+	// native_owner_end is the number of head pieces a native source can name: no
+	// native directive follows them. The V declarations after them are the
+	// prototypes, constants and globals of the program, which change with ordinary
+	// edits of V code.
+	native_owner_end int
+	// native_exports declares the exported V functions among those declarations:
+	// a C binding can still name them.
+	native_exports string
+	// The head pieces from native_decl_start up to native_decl_end declare the
+	// constants and types of the V program, between the native headers and the
+	// native sources that may name some of them.
+	native_decl_start int
+	native_decl_end   int
 }
 
 // c_source joins the generated C pieces into one string.
@@ -1632,6 +1646,8 @@ mut:
 	lit                  string
 	out                  strings.Builder
 	protos               strings.Builder
+	// The prototypes of this file's exported C functions: see FastcUnitLayout.
+	export_prototypes []string
 	// The function definitions of this file, recorded for the reachability
 	// prune: see FastcFileGenOutput.
 	function_id_table    map[string]int
@@ -2007,6 +2023,7 @@ mut:
 	refs              []int
 	root_refs         []int
 	has_main_entry    bool
+	export_prototypes []string
 	fixed_array_types flat.TypeTextBindings
 	composite_types   map[string]bool
 	spawn_typedefs    map[string]string
@@ -2017,6 +2034,7 @@ mut:
 	error_message     string
 }
 
+@[unsafe]
 fn fastc_generate_single_file(ctx &FastcFileGenContext, source_file FastcSourceFile) FastcFileGenOutput {
 	file := token.File.unindexed(source_file.path, source_file.source.len)
 	prefs := ctx.prefs
@@ -2163,6 +2181,7 @@ fn fastc_generate_single_file(ctx &FastcFileGenContext, source_file FastcSourceF
 		refs:              refs
 		root_refs:         root_refs
 		has_main_entry:    source_file.header.module_name in ['', 'main'] && gen.has_main
+		export_prototypes: gen.export_prototypes
 		fixed_array_types: gen.fixed_array_types
 		composite_types:   gen.composite_types
 		spawn_typedefs:    gen.spawn_typedefs
@@ -2285,16 +2304,15 @@ fn generate_source_pieces(input_sources []FastcSourceFile, module_aliases map[st
 		}
 	}
 	for key, signature in functions {
-		if key == 'main' || key.contains('.') || signature.module_name !in ['', 'main'] {
+		if key == 'main' || key.starts_with('C.') || signature.is_global
+			|| (key !in constants && key !in globals) {
 			continue
 		}
-		// A main-module function shares the `main__` namespace with the main module's
-		// constants and the global `byte`. V accepts a constant and a function of the
-		// same name, so such a function is named in FastC's own namespace instead.
+		// V accepts a constant and a function of the same name. When their C
+		// spellings also coincide, give the function a distinct symbol.
 		c_name := function_c_names[key] or { fastc_c_function_name_for_key(key) }
-		if c_name.starts_with('main__')
-			&& ((constants[key] or { '' }) == c_name || (globals[key] or { '' }) == c_name) {
-			function_c_names[key] = '__vf_function_${c_name['main__'.len..]}'
+		if (constants[key] or { '' }) == c_name || (globals[key] or { '' }) == c_name {
+			function_c_names[key] = '__vf_function_${c_name.trim_string_left('main__')}'
 		}
 	}
 	// A method is named `<module>__<Receiver>_<method>`, which a free function of the
@@ -3016,6 +3034,7 @@ fn generate_source_pieces(input_sources []FastcSourceFile, module_aliases map[st
 		}
 		pieces << '\n'
 	}
+	units.native_decl_start = pieces.len
 	pieces << fastc_piece(constant_output.macros)
 	pieces << fastc_piece(type_output.declarations_head)
 	pieces << fastc_piece(composite_typedefs)
@@ -3035,6 +3054,7 @@ fn generate_source_pieces(input_sources []FastcSourceFile, module_aliases map[st
 		pieces << spawn_typedefs[function_type_name]
 	}
 	pieces << fastc_piece(callback_fixed_array_declarations)
+	units.native_decl_end = pieces.len
 	for include in native_source_includes {
 		pieces << include
 	}
@@ -3056,6 +3076,14 @@ fn generate_source_pieces(input_sources []FastcSourceFile, module_aliases map[st
 	if prefs.target_libc_headers {
 		pieces << fastc_target_c_extern_prototypes_for_context(functions, used_function_names, prefs, native_context)
 	}
+	units.native_owner_end = pieces.len
+	mut export_prototypes := strings.new_builder(256)
+	for output in outputs {
+		for prototype in output.export_prototypes {
+			export_prototypes.writeln(prototype)
+		}
+	}
+	units.native_exports = fastc_take_string(mut export_prototypes)
 	extern_indexes << pieces.len
 	extern_texts << fastc_extern_declarations(constant_output.declarations, true)
 	define_texts << fastc_extern_declarations(constant_output.declarations, false)
@@ -3482,7 +3510,12 @@ fn fastc_c_declaration_has_native_input(path string, inputs []string) bool {
 fn fastc_vlib_native_helper_has_input(name string, paths []string, inputs []string, context FastcNativeSourceContext, vroot string) bool {
 	if !(name.starts_with('v3_') || name.starts_with('v_runtime_') || name.starts_with('v_time_')
 		|| name.starts_with('v_builtin_') || name.starts_with('v_set_')
-		|| name.starts_with('v__gc_')) {
+		|| name.starts_with('v__gc_') || name.starts_with('v_gc_')) {
+		return false
+	}
+	// fastc_gc_thread_redirects declares the thread and dlopen helpers with their
+	// pthread types; a second prototype from the V view would conflict with it.
+	if name.starts_with('v_gc_pthread_') || name == 'v_gc_dlopen' {
 		return false
 	}
 	root := vroot.replace('\\', '/').trim_right('/')
@@ -4598,11 +4631,13 @@ fn fastc_c_main_parameters(prefs &pref.Preferences) string {
 
 // fastc_c_main_binary_stdio_lines returns the entry statements that switch stdout and
 // stderr out of the CRT's text mode on Windows, so a FastC program prints `\n` like the
-// same source built with cgen instead of `\r\n`. Selfhost builds get this from
-// builtin (`set_stream_binary_mode` in builtin_windows.c.v); header-targeted builds
-// emit no stdio setup at all, matching the `setvbuf` call they also skip.
+// same source built with cgen instead of `\r\n`. Selfhost builds need it too: cgen
+// does this in `builtin_init` (`set_stream_binary_mode` in builtin_windows.c.v), which
+// FastC's own startup sequence does not call; builtin_windows.c.v includes the
+// headers. Header-targeted builds emit no stdio setup at all, matching the `setvbuf`
+// call they also skip.
 fn fastc_c_main_binary_stdio_lines(prefs &pref.Preferences) []string {
-	if prefs.building_v || prefs.target_libc_headers || prefs.normalized_target_os() != 'windows' {
+	if prefs.target_libc_headers || prefs.normalized_target_os() != 'windows' {
 		return []
 	}
 	return ['_setmode(1, _O_BINARY);', '_setmode(2, _O_BINARY);']

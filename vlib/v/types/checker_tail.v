@@ -38,6 +38,7 @@ fn last_index_between(source string, needle string, lo int, end int) int {
 	return -1
 }
 
+@[unsafe]
 fn (tc &TypeChecker) pointer_diagnostic_binding_type_id(id flat.NodeId, typ &Type) u32 {
 	type_name_id := tc.type_name(typ)
 	// Only pointer-flavored bindings can resolve to `nil`/`voidptr`; skip the
@@ -2028,6 +2029,7 @@ fn (tc &TypeChecker) lvalue_ident_is_known(name string) bool {
 	return tc.const_type_for_name(name) != none || tc.fn_value_type(name) != none
 }
 
+@[unsafe]
 fn (tc &TypeChecker) mut_param_binding_matches_lvalue(name string) bool {
 	if tc.cur_scope == unsafe { nil } {
 		return false
@@ -2051,6 +2053,7 @@ fn (tc &TypeChecker) mut_param_binding_matches_lvalue(name string) bool {
 	return false
 }
 
+@[unsafe]
 fn (tc &TypeChecker) mut_value_param_binding_matches_lvalue(name string) bool {
 	if tc.cur_scope == unsafe { nil } {
 		return false
@@ -2802,10 +2805,12 @@ fn (tc &TypeChecker) returned_binding_history_cannot_borrow_local_storage(id fla
 	return false
 }
 
+@[unsafe]
 fn (tc &TypeChecker) returned_binding_history_has_no_local_sources(id flat.NodeId, visited []flat.NodeId, local_sources map[string]flat.NodeId) bool {
 	return tc.returned_binding_history_has_no_local_sources_scoped(id, visited, local_sources, unsafe { nil })
 }
 
+@[unsafe]
 fn (tc &TypeChecker) returned_binding_history_has_no_local_sources_scoped(id flat.NodeId, visited []flat.NodeId, local_sources map[string]flat.NodeId, scope voidptr) bool {
 	mut probe := tc.fork_storage_observation_view()
 	if scope != unsafe { nil } {
@@ -2904,6 +2909,8 @@ fn (mut tc TypeChecker) record_null_constant_return_errors(node flat.Node, expec
 			for i in 0 .. node.children_count {
 				tc.record_null_constant_reference_error(.return_mismatch, tc.a.child(&node, i),
 					multi.types[i])
+				tc.record_unsafe_null_return_error(.return_mismatch, tc.a.child(&node, i),
+					multi.types[i])
 			}
 		}
 		return false
@@ -2912,8 +2919,11 @@ fn (mut tc TypeChecker) record_null_constant_return_errors(node flat.Node, expec
 		return false
 	}
 	payload := if expected is ResultType { *expected.base_type } else { expected }
-	return tc.record_null_constant_reference_error(.return_mismatch, tc.a.child(&node, 0),
-		payload)
+	child_id := tc.a.child(&node, 0)
+	if tc.record_null_constant_reference_error(.return_mismatch, child_id, payload) {
+		return true
+	}
+	return tc.record_unsafe_null_return_error(.return_mismatch, child_id, payload)
 }
 
 // check_return validates check return state for types.
@@ -8812,6 +8822,7 @@ fn (tc &TypeChecker) should_diagnose_notice(id flat.NodeId) bool {
 	return tc.should_diagnose_with_dependencies(id, false)
 }
 
+@[unsafe]
 fn (tc &TypeChecker) should_diagnose_with_dependencies(id flat.NodeId, include_dependencies bool) bool {
 	if tc.valid_diagnostic_fast {
 		return false
@@ -9487,6 +9498,7 @@ struct ImportLineScanArgs {
 	queue chan int
 }
 
+@[unsafe]
 fn import_line_scan_thread(arg voidptr) voidptr {
 	args := unsafe { &ImportLineScanArgs(arg) }
 	mut scans := unsafe { &[]ImportLineScan(args.scans) }
@@ -12610,6 +12622,7 @@ fn (tc &TypeChecker) expr_root_constant_name(id flat.NodeId) ?string {
 	return none
 }
 
+@[unsafe]
 fn (tc &TypeChecker) ident_is_mutable_lvalue(name string) bool {
 	if name == '' {
 		return false
@@ -12670,6 +12683,7 @@ fn (tc &TypeChecker) current_shared_expr_lock_mode(id flat.NodeId) u8 {
 	return tc.current_shared_lock_mode(key)
 }
 
+@[unsafe]
 fn (tc &TypeChecker) binding_owner_is_global(owner ScopeBindingOwner) bool {
 	// A parallel checker adds its private file scope in front of the collected
 	// program scope, so globals can live in any ancestor of `file_scope`.
@@ -12683,6 +12697,7 @@ fn (tc &TypeChecker) binding_owner_is_global(owner ScopeBindingOwner) bool {
 	return false
 }
 
+@[unsafe]
 fn (tc &TypeChecker) ident_is_global_binding(name string) bool {
 	if name == '' || tc.cur_scope == unsafe { nil } || tc.file_scope == unsafe { nil } {
 		return false
@@ -12717,6 +12732,7 @@ fn (tc &TypeChecker) expr_root_is_global_binding(id flat.NodeId) bool {
 	}
 }
 
+@[unsafe]
 fn (tc &TypeChecker) binding_owner_is_file_scope(owner ScopeBindingOwner) bool {
 	// Parallel checker views put a private file scope in front of the collected
 	// program scope, so globals can belong to either that scope or an ancestor.
@@ -12825,14 +12841,23 @@ fn (mut tc TypeChecker) register_visible_mutation_fn_decl_with_lowered(idx int, 
 		return
 	}
 	tc.register_visible_mutation_fn_decl_keys(idx, module_name, qname, source_name, c_qname,
-		c_source_name, false)
-	tc.register_visible_mutation_fn_decl_keys(idx, module_name, qname, source_name, c_qname,
-		c_source_name, true)
+		c_source_name)
 }
 
-// register_visible_mutation_fn_decl_keys records one declaration under either its
-// module-less (`global`) or its module-qualified keys.
-fn (mut tc TypeChecker) register_visible_mutation_fn_decl_keys(idx int, module_name string, qname string, source_name string, c_qname string, c_source_name string, global bool) {
+// register_visible_mutation_fn_decl_keys records one declaration under its
+// names. The first declaration of a name owns its module-less key; a later one
+// of another module is kept under its module-qualified key.
+fn (mut tc TypeChecker) register_visible_mutation_fn_decl_keys(idx int, module_name string, qname string, source_name string, c_qname string, c_source_name string) {
+	if isnil(tc.visible_mutation_cache) {
+		return
+	}
+	mut cache := tc.visible_mutation_cache
+	cache.register_fn_decl_keys(idx, module_name, qname, source_name, c_qname, c_source_name)
+}
+
+// register_fn_decl_keys is register_visible_mutation_fn_decl_keys for the
+// index `cache`.
+fn (mut cache VisibleMutationCache) register_fn_decl_keys(idx int, module_name string, qname string, source_name string, c_qname string, c_source_name string) {
 	decl_module := if module_name == '' { 'main' } else { module_name }
 	decl := VisibleMutationFnDecl{
 		idx: idx
@@ -12848,10 +12873,6 @@ fn (mut tc TypeChecker) register_visible_mutation_fn_decl_keys(idx int, module_n
 		candidates << c_qname
 		candidates << c_source_name
 	}
-	if isnil(tc.visible_mutation_cache) {
-		return
-	}
-	mut cache := tc.visible_mutation_cache
 	// An insert copies its key, so a short key is spelled in a stack buffer.
 	mut key_buf := [192]u8{}
 	for i, candidate in candidates {
@@ -12860,11 +12881,14 @@ fn (mut tc TypeChecker) register_visible_mutation_fn_decl_keys(idx int, module_n
 		if candidate in candidates[..i] {
 			continue
 		}
-		if global {
-			// The module-less key `\x01${candidate}` keeps `candidate` in global_decls.
-			if candidate !in cache.global_decls {
-				cache.global_decls[candidate] = decl
+		// The module-less key `\x01${candidate}` keeps `candidate` in global_decls.
+		if first := cache.global_decls[candidate] {
+			if first.mod == decl_module {
+				// The module's first declaration of the name is that one.
+				continue
 			}
+		} else {
+			cache.global_decls[candidate] = decl
 			continue
 		}
 		key_len := decl_module.len + 1 + candidate.len
@@ -12922,6 +12946,12 @@ fn (tc &TypeChecker) visible_mutation_fn_decl(name string, fallback_mod string) 
 				}
 			} else if decl := cache.decls[cache_key] {
 				return decl
+			} else if decl := cache.global_decls[lookup_name] {
+				// A module's first declaration of a name has no module-qualified
+				// key when it is the first one of the program.
+				if decl.mod == fallback_mod {
+					return decl
+				}
 			}
 			if cache.decl_misses[cache_key] {
 				return none
@@ -16353,6 +16383,7 @@ fn fn_type_has_platform_int(t FnType) bool {
 	return false
 }
 
+@[unsafe]
 fn (mut tc TypeChecker) check_call_arg_types(id flat.NodeId, node flat.Node, info0 CallInfo) {
 	info := tc.builtin_copy_call_info(id, node, tc.call_info_with_inferred_receiver(node,
 		tc.specialized_plain_generic_call_info(node, info0)), true)

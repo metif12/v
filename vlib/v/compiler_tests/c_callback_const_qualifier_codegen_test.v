@@ -1,11 +1,21 @@
 import os
 import strings
+import v.tempname
 
 const const_cb_vexe = @VEXE
 const const_cb_tests_dir = os.dir(@FILE)
 const const_cb_v3_dir = os.dir(const_cb_tests_dir)
 const const_cb_vlib_dir = os.dir(const_cb_v3_dir)
 const const_cb_v3_src = os.join_path(const_cb_v3_dir, 'v.v')
+const const_cb_compiler_dir = os.join_path(os.vtmp_dir(), 'v3_const_callback_${tempname.unique_token()}')
+
+fn testsuite_begin() {
+	os.mkdir_all(const_cb_compiler_dir) or { panic(err) }
+}
+
+fn testsuite_end() {
+	os.rmdir_all(const_cb_compiler_dir) or {}
+}
 
 fn const_cb_build_v3() string {
 	return const_cb_build_v3_with_flags('serial', '')
@@ -16,8 +26,10 @@ fn const_cb_build_v3_parallel() string {
 }
 
 fn const_cb_build_v3_with_flags(name string, flags string) string {
-	v3_bin := os.join_path(os.temp_dir(), 'v3_const_callback_test_${name}_${os.getpid()}')
-	os.rm(v3_bin) or {}
+	v3_bin := os.join_path(const_cb_compiler_dir, name) + $if windows { '.exe' } $else { '' }
+	if os.is_executable(v3_bin) {
+		return v3_bin
+	}
 	build :=
 		os.exec([const_cb_vexe, ...(os.split_args(flags) or { panic(err) }), '-gc', 'none', '-path',
 			'${const_cb_vlib_dir}' + '|@vlib|@vmodules', '-o', v3_bin, '${const_cb_v3_src}'])
@@ -55,6 +67,7 @@ typedef struct late_alias_desc {
 	return path
 }
 
+@[unsafe]
 fn test_c_callback_const_qualifier_codegen() {
 	v3_bin := const_cb_build_v3()
 	src := const_cb_write_project('module main
@@ -167,6 +180,7 @@ fn main() {
 	assert !generated.contains('.plain = plain_event_callback_adapter_'), generated
 }
 
+@[unsafe]
 fn test_generic_heap_positional_c_callback_codegen() {
 	v3_bin := const_cb_build_v3()
 	src := const_cb_write_project('module main
@@ -226,6 +240,7 @@ fn main() {
 	assert !generated.contains('.cb = concrete_event,'), generated
 }
 
+@[unsafe]
 fn test_c_callback_c_alias_declared_after_field_codegen() {
 	v3_bin := const_cb_build_v3()
 	src := const_cb_write_project('module main
@@ -287,6 +302,7 @@ fn main() {
 	assert !generated.contains('desc.cb = late_alias_event;'), generated
 }
 
+@[unsafe]
 fn test_c_callback_const_qualifier_parallel_worker_codegen() {
 	v3_bin := const_cb_build_v3_parallel()
 	mut src := strings.new_builder(96 * 1024)

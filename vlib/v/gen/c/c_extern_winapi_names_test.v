@@ -2,9 +2,19 @@ module c
 
 import os
 
+fn testsuite_begin() {
+	// The MSVC that a Windows job selects through VFLAGS cannot target Linux or macOS,
+	// and with it Windows C includes the SDK instead of the headerless declarations
+	// this file checks; let these builds use the default compiler.
+	if os.getenv('VFLAGS').contains('msvc') {
+		os.unsetenv('VFLAGS')
+	}
+}
+
 // winapi_names_project writes a program that links C functions of its own which
 // share their names with Win32 APIs. The object ships no header, so V writes their
 // prototypes itself.
+@[unsafe]
 fn winapi_names_project(name string) !string {
 	root := os.join_path(os.vtmp_dir(), 'c_extern_winapi_names_${name}_${os.getpid()}')
 	os.rmdir_all(root) or {}
@@ -55,6 +65,7 @@ fn test_program_owned_winapi_names_keep_their_meaning_off_windows() {
 	}
 }
 
+@[unsafe]
 fn test_windows_winapi_names_respect_sdk_ownership_and_headerless_prototypes() {
 	root := os.join_path(os.vtmp_dir(), 'c_extern_real_winapi_${os.getpid()}')
 	os.rmdir_all(root) or {}

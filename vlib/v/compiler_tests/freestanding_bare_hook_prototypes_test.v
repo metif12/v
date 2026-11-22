@@ -5,6 +5,7 @@ const bare_hook_vexe = @VEXE
 // builtin's `-freestanding` branches call hooks that only a bare builtin
 // implementation defines. The generated C must declare each one before its
 // first call, or clang 16+ and gcc 14 reject it as an implicit declaration.
+@[unsafe]
 fn test_freestanding_output_declares_bare_hooks_before_use() {
 	root := os.join_path(os.vtmp_dir(), 'v3_freestanding_bare_hooks_${os.getpid()}')
 	os.rmdir_all(root) or {}
@@ -26,8 +27,10 @@ fn main() {
 		panic(err)
 	}
 	c_file := os.join_path(root, 'main.c')
-	res := os.exec([bare_hook_vexe, '-gc', 'none', '-freestanding', '-no-std', '-os', 'linux',
-		'-o', c_file, '${src}'])
+	// The assertion inspects generated Linux C, even on a Windows MSVC runner.
+	// Do not inherit `-cc msvc` from VFLAGS: MSVC rejects a Linux target before Cgen.
+	res := os.exec([bare_hook_vexe, '-cc', 'gcc', '-gc', 'none', '-freestanding', '-no-std', '-os',
+		'linux', '-o', c_file, '${src}'])
 	assert res.exit_code == 0, res.output
 	c_source := os.read_file(c_file) or { panic(err) }
 	for hook, prototype in {

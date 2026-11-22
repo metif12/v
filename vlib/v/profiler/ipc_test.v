@@ -7,6 +7,7 @@ import time
 // A snapshot must round-trip file paths that contain commas: the record format
 // puts the path last and the reader rejoins the trailing fields, so a comma in
 // the path can no longer be mistaken for extra columns.
+@[unsafe]
 fn test_snapshot_roundtrips_file_paths_with_commas() {
 	init_profiler_state()
 	profiler_enable()
@@ -15,6 +16,10 @@ fn test_snapshot_roundtrips_file_paths_with_commas() {
 	// Record an allocation whose source path contains commas.
 	ptr := profiler_alloc_with_location(64, '/tmp/weird,path/with,commas.v', 42)
 	assert ptr != unsafe { nil }
+	// The block comes from C.malloc, outside the GC heap; release it after the snapshot.
+	defer {
+		profiler_free(ptr, unsafe { nil })
+	}
 
 	path := os.join_path(os.temp_dir(),
 		'v3_profiler_ipc_test_${os.getpid()}_${time.sys_mono_now()}.dat')

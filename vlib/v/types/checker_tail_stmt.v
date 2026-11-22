@@ -3,6 +3,7 @@ module types
 import os
 import strconv
 import strings
+import time
 import v.flat
 import v.gen.c.naming
 import v.token
@@ -5829,8 +5830,11 @@ mut:
 	// enum_decls_complete is false when the qualified spelling of an enum was not
 	// interned yet: the scan that enum_decls replaces interns each one it passes.
 	enum_decls_complete bool
-	// decl_assign_names holds every identifier that a `decl_assign` declares.
-	decl_assign_names map[string]bool
+	// decl_assign_bloom is a filter of every identifier that a `decl_assign`
+	// among `nodes_len` nodes declares: no `decl_assign` declares a name that it
+	// excludes. Its storage is in `bloom_scope` when that is set.
+	decl_assign_bloom &ConstSelectorBloom = unsafe { nil }
+	bloom_scope       voidptr
 	// struct_decls maps the name, and the name qualified by the module declared
 	// before it, of each top-level `struct_decl` to those declarations, in
 	// top_level_idx order (see source_struct_field_decls).
@@ -5859,6 +5863,13 @@ struct CheckStructDeclRef {
 
 // new_check_decl_indexes builds the declaration indexes of the current AST.
 fn (tc &TypeChecker) new_check_decl_indexes() &CheckDeclIndexes {
+	return tc.new_check_decl_indexes_opt(true)
+}
+
+// new_check_decl_indexes_opt is new_check_decl_indexes; without `scan_nodes`,
+// it leaves out the index that reads every node (see
+// prepare_check_indexes_parallel).
+fn (tc &TypeChecker) new_check_decl_indexes_opt(scan_nodes bool) &CheckDeclIndexes {
 	mut indexes := &CheckDeclIndexes{
 		live:                true
 		top_level_len:       tc.top_level_idx.len
@@ -5954,16 +5965,14 @@ fn (tc &TypeChecker) new_check_decl_indexes() &CheckDeclIndexes {
 			names: names
 		}
 	}
-	for i in 0 .. tc.a.nodes.len {
-		node := tc.a.node(flat.NodeId(i))
-		if node.kind != .decl_assign {
-			continue
-		}
-		for child_idx := 0; child_idx < node.children_count; child_idx += 2 {
-			lhs := tc.a.node(tc.a.child(node, child_idx))
-			if lhs.kind == .ident && lhs.value !in indexes.decl_assign_names {
-				indexes.decl_assign_names[lhs.value] = true
-			}
+	if scan_nodes {
+		mask := decl_assign_bloom_mask(tc.a.nodes.len)
+		mut bits := []u64{len: int((mask + 1) >> 6)}
+		tc.scan_check_index_range(0, tc.a.nodes.len, mut bits, mask)
+		indexes.decl_assign_bloom = &ConstSelectorBloom{
+			count: tc.a.nodes.len
+			mask:  mask
+			bits:  bits
 		}
 	}
 	return indexes
@@ -5992,18 +6001,23 @@ fn (tc &TypeChecker) enum_fields_contain(enum_name_id u32, fields []string, fiel
 
 // retire_check_decl_indexes ends the use of the declaration indexes, also by the
 // forks and views that still point to them, and drops the source text memo.
+@[unsafe]
 fn (mut tc TypeChecker) retire_check_decl_indexes() {
 	mut indexes := tc.check_decl_indexes
 	if !isnil(indexes) {
 		indexes.live = false
+		indexes.decl_assign_bloom = unsafe { nil }
+		check_worker_scope_free(indexes.bloom_scope)
+		indexes.bloom_scope = unsafe { nil }
 	}
+	tc.release_prepared_check_inputs()
 	tc.check_decl_indexes = unsafe { nil }
 	tc.source_type_keyword_memo = unsafe { nil }
 }
 
 // top_level_check_decl_indexes returns the live declaration indexes when they
 // describe the current top-level declaration index, or nil.
-@[inline]
+@[inline; unsafe]
 fn (tc &TypeChecker) top_level_check_decl_indexes() &CheckDeclIndexes {
 	indexes := tc.check_decl_indexes
 	if isnil(indexes) || !indexes.live || indexes.top_level_len != tc.top_level_idx.len
@@ -7364,6 +7378,7 @@ fn (tc &TypeChecker) ident_is_capturing_fn_literal_alias(name string) bool {
 	return tc.capturing_fn_literal_locals[binding_key]
 }
 
+@[unsafe]
 fn (tc &TypeChecker) visible_binding_storage_key(name string) ?string {
 	if tc.cur_scope == unsafe { nil } {
 		return none
@@ -9891,6 +9906,7 @@ fn (mut tc TypeChecker) check_ident(id flat.NodeId, node flat.Node) {
 	}
 }
 
+@[unsafe]
 fn (tc &TypeChecker) ident_uses_forbidden_closure_capture(name string) bool {
 	if !tc.fn_context.closure_forbidden_captures[name]
 		|| tc.fn_context.closure_scope == unsafe { nil } {
@@ -9954,7 +9970,7 @@ fn (tc &TypeChecker) future_local_decl_id(name string, use_id flat.NodeId) ?flat
 	// Only an identifier that some `decl_assign` declares can be found below.
 	indexes := tc.check_decl_indexes
 	if !isnil(indexes) && indexes.live && indexes.nodes_len == tc.a.nodes.len
-		&& name !in indexes.decl_assign_names {
+		&& indexes.decl_assign_bloom.excludes(name, indexes.nodes_len) {
 		return none
 	}
 	fn_id := flat.NodeId(tc.fn_context.node_id)
@@ -10061,6 +10077,7 @@ fn (mut tc TypeChecker) check_defer_result(id flat.NodeId, node flat.Node) {
 	})
 }
 
+@[unsafe]
 fn (tc &TypeChecker) non_file_scope_type(name string) ?Type {
 	owner := tc.cur_scope.lookup_owner(name) or { return none }
 	if owner.belongs_to_scope(tc.file_scope) {
@@ -10072,6 +10089,7 @@ fn (tc &TypeChecker) non_file_scope_type(name string) ?Type {
 	return owner.scope.types[owner.index]
 }
 
+@[unsafe]
 fn (tc &TypeChecker) bare_name_is_const_owned_over_global(name string) bool {
 	if tc.global_name_bloom.excludes(name, u64(tc.global_names.len)) || name.contains('.')
 		|| name !in tc.global_names {
@@ -11036,6 +11054,7 @@ fn (tc &TypeChecker) null_constant_expr_text(id flat.NodeId) string {
 // explicit cast `&T(0)` already is. `unsafe { nil }` stays the way to write a null
 // reference. `voidptr` targets, `.c.v` files and translated files are left alone, as
 // they are by the cast rule.
+@[unsafe]
 fn (mut tc TypeChecker) record_null_constant_reference_error(kind TypeErrorKind, expr_id flat.NodeId, expected Type) bool {
 	if tc.unsafe_depth > 0 || unalias_type(expected) !is Pointer {
 		return false
@@ -11053,6 +11072,75 @@ fn (mut tc TypeChecker) record_null_constant_reference_error(kind TypeErrorKind,
 	} else {
 		'cannot use `${text}` as `${call_argument_type_name(expected)}` outside `unsafe`, use `unsafe { nil }`'
 	}
+	tc.record_error_at(kind, msg, expr_id, tc.a.node(expr_id).pos)
+	return true
+}
+
+// unsafe_null_pointer_expr_text reports whether `id` is an `unsafe` block or expression that
+// yields a null pointer (`nil`, `0` or `voidptr(0)`). Anything else yields an empty string.
+fn (tc &TypeChecker) unsafe_null_pointer_expr_text(id flat.NodeId) string {
+	value_id := tc.unwrap_paren_expr_id(id)
+	if !tc.valid_node_id(value_id) {
+		return ''
+	}
+	value := tc.a.node(value_id)
+	if value.kind != .block || value.value != 'unsafe' {
+		return ''
+	}
+	tail_id := tc.branch_tail_expr_id(value_id)
+	if !tc.valid_node_id(tail_id) {
+		return ''
+	}
+	text := tc.null_constant_expr_text(tail_id)
+	if text != '' {
+		return 'unsafe { ' + text + ' }'
+	}
+	nested := tc.unsafe_null_pointer_expr_text(tail_id)
+	if nested != '' {
+		return nested
+	}
+	return ''
+}
+
+fn (tc &TypeChecker) is_unsafe_null_pointer_expr(id flat.NodeId) bool {
+	return tc.unsafe_null_pointer_expr_text(id) != ''
+}
+
+fn (tc &TypeChecker) current_function_is_unsafe() bool {
+	fn_id := flat.NodeId(tc.fn_context.node_id)
+	if !tc.valid_node_id(fn_id) {
+		return false
+	}
+	fn_node := tc.a.node(fn_id)
+	if fn_node.kind != .fn_decl {
+		return false
+	}
+	return fn_node.value in tc.unsafe_fn_modules
+}
+
+// record_unsafe_null_return_error rejects an `unsafe { nil }` (or equivalent) pointer that is
+// returned by a safe (non-`@[unsafe]`) function with a non-optional reference return type.
+// `unsafe { nil }` remains valid inside an `unsafe` block or an `@[unsafe]` function.
+fn (mut tc TypeChecker) record_unsafe_null_return_error(kind TypeErrorKind, expr_id flat.NodeId, expected Type) bool {
+	if tc.unsafe_depth > 0 || tc.expr_is_inside_unsafe_block(expr_id) {
+		return false
+	}
+	if unalias_type(expected) !is Pointer {
+		return false
+	}
+	if fn_param_is_voidptr_type(expected) {
+		return false
+	}
+	if tc.translated_files[tc.cur_file] || tc.cur_file.ends_with('.c.v') {
+		return false
+	}
+	if tc.current_function_is_unsafe() {
+		return false
+	}
+	if !tc.is_unsafe_null_pointer_expr(expr_id) {
+		return false
+	}
+	msg := 'cannot return a null pointer from a safe function; use `?&T` or mark the function `@[unsafe]`'
 	tc.record_error_at(kind, msg, expr_id, tc.a.node(expr_id).pos)
 	return true
 }
@@ -14193,6 +14281,7 @@ fn interface_impl_candidate_name(name_id u32) u32 {
 }
 
 // ierror_impl_names returns source spelling IDs of concrete structs that can be boxed as `IError`.
+@[unsafe]
 pub fn (tc &TypeChecker) ierror_impl_names() []u32 {
 	if tc.type_cache != unsafe { nil } {
 		mut cache := unsafe { tc.type_cache }
@@ -14295,6 +14384,15 @@ fn (tc &TypeChecker) memo_interface_metadata_name(name_id u32) u32 {
 // memo_index_method_receivers records, for every method that an interface
 // requires, the last components of the receivers of the keys that declare it.
 fn (tc &TypeChecker) memo_index_method_receivers(mut memo InterfaceImplMemo) {
+	tc.memo_index_required_methods(mut memo)
+	tc.memo_index_method_receiver_keys(mut memo)
+	memo.method_keys_ready = true
+}
+
+// memo_index_required_methods records the methods that an interface requires.
+// A method that is missing here is only never proven absent
+// (memo_proves_no_receiver_method).
+fn (tc &TypeChecker) memo_index_required_methods(mut memo InterfaceImplMemo) {
 	for iface_name, _ in tc.interface_names {
 		for method in tc.interface_abstract_method_names(iface_name) {
 			// A key is split at its last dot: a dotted name is never indexed, and
@@ -14309,6 +14407,12 @@ fn (tc &TypeChecker) memo_index_method_receivers(mut memo InterfaceImplMemo) {
 			}
 		}
 	}
+}
+
+// memo_index_method_receiver_keys records the receivers of the keys of the
+// signature tables that declare a required method. It reads the keys of
+// those tables and writes `memo` alone.
+fn (tc &TypeChecker) memo_index_method_receiver_keys(mut memo InterfaceImplMemo) {
 	for key, _ in tc.fn_param_types {
 		memo.index_method_receiver_key(key)
 	}
@@ -14318,7 +14422,6 @@ fn (tc &TypeChecker) memo_index_method_receivers(mut memo InterfaceImplMemo) {
 	for key, _ in tc.receiver_method_suffix_index {
 		memo.index_method_receiver_key(key)
 	}
-	memo.method_keys_ready = true
 }
 
 // required_method_bit spreads method names over the bits of
@@ -14742,6 +14845,7 @@ fn generic_type_arg_short_for_signature(type_arg_id u32) string {
 }
 
 // named_type_compatible_with_ierror checks a source spelling ID against the IError requirements.
+@[unsafe]
 pub fn (tc &TypeChecker) named_type_compatible_with_ierror(concrete_name_id u32) bool {
 	cache_key := tc.ierror_compat_cache_key(concrete_name_id)
 	if tc.type_cache != unsafe { nil } {
@@ -15018,6 +15122,7 @@ fn (tc &TypeChecker) named_type_has_non_builtin_error_embed(concrete_name_id u32
 	return false
 }
 
+@[unsafe]
 fn (tc &TypeChecker) source_struct_has_non_builtin_error_embed(concrete_name_id u32, file string, mod_name string) bool {
 	if isnil(tc.a) {
 		return false
@@ -15700,6 +15805,7 @@ fn (tc &TypeChecker) begin_interface_impl_queries_sharing(shared &InterfaceImplM
 }
 
 // end_interface_impl_queries closes the memo that begin_interface_impl_queries opened.
+@[unsafe]
 pub fn (tc &TypeChecker) end_interface_impl_queries(opened bool) {
 	if opened {
 		mut writable := unsafe { tc }
@@ -15707,10 +15813,14 @@ pub fn (tc &TypeChecker) end_interface_impl_queries(opened bool) {
 	}
 }
 
+@[unsafe]
 pub fn (mut tc TypeChecker) prepare_interface_query_indexes() {
+	mut step_sw := time.new_stopwatch()
 	tc.prepare_interface_requirement_indexes()
+	tc.timing_step(mut step_sw, 'if requirements')
 	tc.interface_impl_indexes = map[u32]&InterfaceImplIndex{}
 	tc.interface_impl_candidates_at_index = tc.interface_impl_candidate_names()
+	tc.timing_step(mut step_sw, 'if candidates')
 	iface_names := tc.interface_names.keys()
 	if !tc.prepare_interface_impl_indexes_parallel(iface_names) {
 		tc.interface_impl_memo = &InterfaceImplMemo{}
@@ -15727,6 +15837,8 @@ pub fn (mut tc TypeChecker) prepare_interface_query_indexes() {
 		}
 		tc.interface_impl_memo = unsafe { nil }
 	}
+	tc.release_collected_interface_memo()
+	tc.timing_step(mut step_sw, 'if impls')
 	// The immutable transform indexes above preserve the pre-monomorphization
 	// order. Do not leave the same lists in the mutable query cache: generic
 	// materialization can add implementers before cgen queries it again.
@@ -17569,6 +17681,7 @@ fn (tc &TypeChecker) sum_has_variant(sum_name_id u32, variant_name_id u32) bool 
 }
 
 // sum_variant_type_for_pattern resolves a sum pattern using source spelling IDs.
+@[unsafe]
 pub fn (tc &TypeChecker) sum_variant_type_for_pattern(sum_name_id u32, variant_name_id u32) ?u32 {
 	if isnil(tc.type_cache) {
 		return tc.sum_variant_type_for_pattern_depth(sum_name_id, variant_name_id, 0)
@@ -18549,7 +18662,7 @@ pub fn type_text_contains_typeof(s string) bool {
 }
 
 // parse_type resolves an interned source spelling in the current checker context.
-@[inline]
+@[inline; unsafe]
 pub fn (tc &TypeChecker) parse_type(source_id u32) &Type {
 	if tc.type_param_texts.len > 0 {
 		if resolved := tc.resolved_inferred_type(source_id) {
@@ -18577,6 +18690,7 @@ pub fn (tc &TypeChecker) parse_type(source_id u32) &Type {
 	return tc.parse_type_miss(source_id)
 }
 
+@[unsafe]
 fn (tc &TypeChecker) parse_type_miss(source_id u32) &Type {
 	if resolved := tc.resolved_inferred_type(source_id) {
 		return tc.parse_type(resolved)
@@ -18610,7 +18724,7 @@ fn (tc &TypeChecker) parse_type_miss(source_id u32) &Type {
 // parse_type_ref resolves a node annotation through its exact canonical text
 // identity. Context remains part of the key because an unqualified spelling
 // can denote different types in different files/modules.
-@[inline]
+@[inline; unsafe]
 pub fn (tc &TypeChecker) parse_type_ref(text_id u32) &Type {
 	if text_id == 0 || !tc.fast_type_text_refs || tc.type_cache == unsafe { nil }
 		|| !tc.type_cache.parse_enabled {
@@ -18659,6 +18773,7 @@ fn (tc &TypeChecker) parse_type_ref_miss(text_id u32) &Type {
 
 // parse_canonical_type_cached is parse_canonical_type memoized per parse
 // context, like parse_type's own cache.
+@[unsafe]
 pub fn (tc &TypeChecker) parse_canonical_type_cached(source_id u32) &Type {
 	if source_id == 0 || !tc.fast_type_text_refs || tc.type_cache == unsafe { nil }
 		|| !tc.type_cache.parse_enabled || tc.type_cache.alias_parse_stack.len > 0 {
@@ -19865,6 +19980,7 @@ fn (mut tc TypeChecker) check_node_inferred_type_witnesses(node &flat.Node) {
 // evaluated. Checking a call first also infers its generic arguments, so the
 // witness names the instantiated return type. An expression whose type still
 // names an unresolved generic placeholder is rejected.
+@[unsafe]
 fn (mut tc TypeChecker) check_inferred_type_witnesses(source_id u32) {
 	if !inferred_type_source(source_id) {
 		return
@@ -20646,6 +20762,7 @@ pub fn (tc &TypeChecker) disarm_body_resolve_memo() {
 // inside a disposable stage arena, so the master checker must drop the pointer
 // before that arena is released — later phases would otherwise dereference a
 // freed allocation just to see that the memo is inactive.
+@[unsafe]
 pub fn (tc &TypeChecker) reset_body_resolve_memo() {
 	mut wtc := unsafe { tc }
 	wtc.body_resolve_memo = unsafe { nil }
@@ -22565,6 +22682,7 @@ fn (tc &TypeChecker) c_extern_abi_type(t &Type) string {
 }
 
 // c_type returns the C representation of a semantic type.
+@[unsafe]
 pub fn (tc &TypeChecker) c_type(t &Type) string {
 	// These representations are constant or depend only on primitive flags.
 	// Interning a collection recursively walks its element types even though

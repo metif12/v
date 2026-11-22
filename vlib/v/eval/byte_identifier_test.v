@@ -4,6 +4,10 @@ import v.flat
 import os
 import v.parser
 
+// The layouts are compared with a compiled program. A Windows `clang` usually targets the
+// MSVC ABI, which V cannot build Windows programs with, so use the MinGW gcc there.
+const layout_c_compiler = $if windows { 'gcc' } $else { 'clang' }
+
 fn test_eval_match_byte_constant_uses_its_value() {
 	mut e := create()
 	e.run_text('
@@ -500,6 +504,7 @@ fn main() {}
 	assert e.enum_types[flat.source_type_id('Marked')].target == flat.source_type_i32
 }
 
+@[unsafe]
 fn test_eval_sizeof_fixed_array_aggregate_elements_matches_compiler() {
 	code := '
 struct Tiny { x u8 }
@@ -563,8 +568,8 @@ fn assert_eval_sizeof_matches_compiler(code string) {
 	source := os.join_path(dir, 'main.v')
 	executable := os.join_path(dir, 'layout')
 	os.write_file(source, code) or { panic(err) }
-	compiled := os.exec([@VEXE, '-new-compiler', '-gc', 'none', '-cc', 'clang', '-o', executable,
-		source])
+	compiled := os.exec([@VEXE, '-new-compiler', '-gc', 'none', '-cc', layout_c_compiler, '-o',
+		executable, source])
 	assert compiled.exit_code == 0, compiled.output
 	result := os.exec([executable])
 	assert result.exit_code == 0, result.output
@@ -590,6 +595,7 @@ fn main() {
 	assert e.stdout() == '8\n8\n16\n'
 }
 
+@[unsafe]
 fn test_eval_sizeof_builtin_aggregate_fields_matches_compiler() {
 	code := '
 struct Fields { head u8; text string; values []u8; lookup map[string]u8 }
@@ -619,6 +625,7 @@ fn main() {
 	assert_eval_sizeof_matches_compiler(code)
 }
 
+@[unsafe]
 fn test_eval_sizeof_imported_aggregate_fields_preserves_file_aliases() {
 	dir := os.join_path(os.vtmp_dir(), 'eval_sizeof_imported_layout_${os.getpid()}')
 	os.mkdir_all(dir) or { panic(err) }
@@ -698,8 +705,8 @@ fn main() {
 	}
 	os.write_file(main_file, compiled_main) or { panic(err) }
 	executable := os.join_path(dir, 'layout')
-	compiled := os.exec([@VEXE, '-new-compiler', '-gc', 'none', '-cc', 'clang', '-o', executable,
-		dir])
+	compiled := os.exec([@VEXE, '-new-compiler', '-gc', 'none', '-cc', layout_c_compiler, '-o',
+		executable, dir])
 	assert compiled.exit_code == 0, compiled.output
 	result := os.exec([executable])
 	assert result.exit_code == 0, result.output
@@ -745,6 +752,7 @@ fn main() { println(sizeof(byte)) }
 	assert e.stdout() == '2\n'
 }
 
+@[unsafe]
 fn test_eval_sizeof_generic_aggregate_elements_matches_compiler() {
 	code := '
 struct Tiny[T] { x T }

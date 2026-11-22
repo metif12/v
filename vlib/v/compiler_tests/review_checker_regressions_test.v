@@ -12,8 +12,8 @@ fn build_v3_review_checker() string {
 		return v3_bin
 	}
 	build :=
-		os.exec([vexe, '-gc', 'none', '-prealloc', '-path', '${vlib_dir}' + '|@vlib|@vmodules',
-			'-o', v3_bin, '${v3_src}'])
+		os.exec([vexe, '-gc', 'none', '-path', '${vlib_dir}' + '|@vlib|@vmodules', '-o', v3_bin,
+			'${v3_src}'])
 	assert build.exit_code == 0, build.output
 	return v3_bin
 }
@@ -1857,6 +1857,7 @@ fn main() {}
 		'when forwarding a variadic variable, it must be the final argument')
 }
 
+@[unsafe]
 fn test_mut_pointer_local_after_mut_pointer_loop_keeps_pointer_type() {
 	v3_bin := build_v3_review_checker()
 	out := run_good(v3_bin, 'mut_pointer_local_after_mut_pointer_loop', 'struct Item {

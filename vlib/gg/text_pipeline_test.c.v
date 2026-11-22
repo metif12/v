@@ -1,10 +1,11 @@
-// vtest build: !msvc
+// vtest build: !msvc && !musl? && !self_ubuntu_musl_ci? // needs X11/GL
 module gg
 
 import fontstash
 import gg.render
 import sokol.gfx
 
+@[unsafe]
 fn test_font_pipeline_restores_default_and_custom_selections() {
 	fons := fontstash.create_internal(&C.FONSparams{
 		width:  64

@@ -68,6 +68,7 @@ fn fastc_is_json2_voidptr_element_check(req FastcMonoRequest, src FastcGenericMe
 // reset_lookup_memos discards the per-file name lookup memos. They are keyed
 // by the bare name only, so they are valid for exactly one module and import
 // context and must be reset whenever the parser switches to another one.
+@[unsafe]
 fn (mut g Parser) reset_lookup_memos() {
 	g.unqualified_key_memo = map[string]string{}
 	g.global_key_memo = map[string]string{}
@@ -1302,7 +1303,9 @@ fn (mut g Parser) emit_export_wrapper(function_key string, c_name string, params
 	}
 	return_type := g.export_c_abi_type(abi.return_type)
 	c_params := if wrapper_params.len == 0 { 'void' } else { wrapper_params.join(', ') }
-	g.protos.writeln('${return_type} ${export_name}(${c_params});')
+	prototype := '${return_type} ${export_name}(${c_params});'
+	g.protos.writeln(prototype)
+	g.export_prototypes << prototype
 	g.write_line('${return_type} ${export_name}(${c_params}) {')
 	g.indent++
 	call := '${c_name}(${arguments.join(', ')})'

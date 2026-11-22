@@ -368,6 +368,7 @@ argument, e.g. `v new abc`.
     * [Compiling for iOS](#compiling-for-ios)
     * [Debugging](#debugging)
         * [C Backend binaries Default](#c-backend-binaries-default)
+        * [Panics and stack traces](#panics-and-stack-traces)
         * [Native Backend binaries](#native-backend-binaries)
         * [Javascript Backend](#javascript-backend)
 
@@ -6749,6 +6750,9 @@ Race builds:
   collector or an arena allocator hides from it;
 * typically run 2-20x slower and use 5-10x more memory, like in Go (with `-prod`, a function
   that was inlined into its caller is reported as the caller);
+* are not link-time optimized with `-prod` (no `-flto`): link time optimization runs after
+  the ThreadSanitizer instrumentation, and with clang 15 and older it turns copies of strings,
+  arrays and structs back into plain loads and stores, which the race detector does not see;
 * define `race`, so code can check for them with `$if race ? {}`, and `_d_race.v` files are
   compiled in them. That define is reserved: `-d race` without `-race` is an error.
 
@@ -10833,6 +10837,42 @@ use `v help`, `v help build` and `v help build-c`.
 * [CodeLite](codelite.md)
 * [Visual Studio Code](vscode.md)
 
+### Panics and stack traces
+
+A panic prints its message, the .v file and line of the `panic()` call, and a stack trace
+of the functions that led to it, innermost first:
+
+```text
+V panic: boom 3
+     at: p.v:3 in main.inner()
+ v hash: afbcf1d
+    pid: 0x2d72
+    tid: 0x2d72
+
+inner()
+middle()
+main()
+(build with `-g` to see the .v line of every frame)
+```
+
+Without `-g`, the executable has no line information, so only the `panic()` call has a .v
+line. `-prod` executables leave it out as well, so they do not contain source paths. Build
+with `-g` to see the .v line of every frame, like in Go:
+
+```text
+inner()
+	/home/user/p.v:3
+middle()
+	/home/user/p.v:9
+main()
+	/home/user/p.v:15
+```
+
+On macOS the lines come from `atos`, which can not read the debug information of TinyCC,
+so use `-cc clang -g` there. On Linux they come from `addr2line`. Panics that the runtime
+raises, like an array index out of range, show the .v line of your code only in such a
+stack trace.
+
 ### Native Backend binaries
 
 `v self` builds the compiler with only the C backend by default. Selecting another backend,
@@ -10846,9 +10886,14 @@ architecture. Without `-arch`, the target defaults to the compiler's host archit
 Pass `-arch amd64` to select `-b amd64` (`-b x64`), or `-arch arm64` to select `-b arm64`.
 The architecture option can appear before or after the native backend option.
 Explicit backend selection remains available, with the same platform requirements: macOS
-ARM64 and Linux AMD64 support executables. Linux ARM64 currently supports object output only;
-for example, `v -b native -arch arm64 -o hello_world.o hello_world.v` on Linux emits an ARM64
-ELF object, including from an AMD64 host. It does not link a Linux ARM64 executable.
+ARM64, Linux AMD64, and Linux ARM64 support executables. For example,
+`v -b native -arch arm64 hello_world.v` on Linux emits an ARM64 ELF executable.
+Cross linking uses `aarch64-linux-gnu-gcc` or `aarch64-linux-musl-gcc` when available;
+use `-cc` to select another Linux ARM64 toolchain, including its startup files and libc.
+Linux ARM64 linking honors libraries and objects declared through source `#flag` directives.
+Environment `CFLAGS` are applied before explicit `-cflags` options.
+Exported V functions and their dependencies remain available to linked C code.
+Object output (`-o hello_world.o`) works without a target linker, including from an AMD64 host.
 For a Linux AMD64 ELF object, use `v -b amd64 -o hello_world.o hello_world.v`.
 
 The native backends do not link a garbage collector yet, so they always build as if `-gc none`
@@ -12048,9 +12093,9 @@ extract time instead of emitting silently broken machine code.
 path (its live function calls other functions and prints strings); it
 remains an example for the C shared-library workflow.
 
-Linux ARM64 output is experimental and currently supports relocatable objects
-only (`v -b arm64 -os linux -o program.o program.v`). Executable linking and
-native live reloading on Linux are not yet supported.
+Linux ARM64 output is experimental and supports executable linking with a Linux ARM64
+toolchain, as well as relocatable objects (`v -b arm64 -os linux -o program.o program.v`).
+Native live reloading on Linux is not yet supported.
 
 More examples, including a graphical application:
 [github.com/vlang/v/tree/master/examples/hot_reload](https://github.com/vlang/v/tree/master/examples/hot_reload).

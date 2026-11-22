@@ -250,6 +250,7 @@ fn (t &Transformer) interface_type_with_pointer_depth(source_type_id u32, interf
 // `share_source` makes the boxed `_object` point at the source lvalue instead of a
 // heap copy; it is only safe when the source is guaranteed to outlive the box
 // (mut/reference call arguments, global initializers).
+@[unsafe]
 fn (mut t Transformer) transform_interface_value_for_type(id flat.NodeId, target_type_id u32, share_source bool) ?flat.NodeId {
 	if int(id) < 0 || target_type_id == u32(0) || isnil(t.tc) {
 		return none
@@ -974,13 +975,14 @@ fn (mut t Transformer) make_interface_literal_from_expr(id flat.NodeId, iface_na
 	fields := t.interface_runtime_field_list(iface_name_id)
 	mut source_id := id
 	mut source_type := t.node_type(id)
-	if t.expr_has_option_unwrap_smartcast(id) {
-		if smartcast := t.find_smartcast_for_expr(id) {
-			unwrapped_type_source_id_2 := t.smartcast_target_type(smartcast)
-			unwrapped_type_source_id_4 := unwrapped_type_source_id_2
-
-			if unwrapped_type_source_id_2 != 0 {
-				source_type = unwrapped_type_source_id_4
+	if smartcast := t.find_smartcast_for_expr(id) {
+		// A sum value narrowed by `is` or `match` lowers to its variant payload
+		// (`s.Cat`), but its node type can still be the declared sum type. Box the
+		// variant, so the `_typ` id, the `_object` type and the copied size match it.
+		if t.expr_has_option_unwrap_smartcast(id) || t.is_sum_type_name(smartcast.sum_type_name) {
+			target_type := t.smartcast_target_type(smartcast)
+			if target_type != 0 {
+				source_type = target_type
 			}
 		}
 	}
