@@ -9967,8 +9967,23 @@ fn (mut p Parser) reject_range_condition_expr(expr_id flat.NodeId) {
 	}
 	low := p.a.child_node(node, 0)
 	high := p.a.child_node(node, 1)
-	p.record_diagnostic_span('range cannot be used as a condition, iterate with `for i in ${low} .. ${high}` instead',
+	low_text := p.range_condition_bound_text(low, 'low')
+	high_text := p.range_condition_bound_text(high, 'high')
+	p.record_diagnostic_span('range cannot be used as a condition, iterate with `for i in ${low_text} .. ${high_text}` instead',
 		low.pos.offset, high.pos.end)
+}
+
+// range_condition_bound_text returns the source text of a range bound for use
+// in diagnostics, falling back to `fallback` when the span is unavailable.
+fn (p &Parser) range_condition_bound_text(node &flat.Node, fallback string) string {
+	if node.pos.is_valid() && node.pos.offset >= 0 && node.pos.end <= p.s.src.len
+		&& node.pos.offset < node.pos.end {
+		text := p.s.src[node.pos.offset..node.pos.end].trim_space()
+		if text.len > 0 {
+			return text
+		}
+	}
+	return fallback
 }
 
 fn (mut p Parser) record_formatter_for_span(id flat.NodeId, start int) flat.NodeId {

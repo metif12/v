@@ -1,4 +1,4 @@
-vlib/v/checker/tests/if_range_condition_err.vv:2:5: error: range cannot be used as a condition, iterate with `for i in low .. high` instead
+vlib/v/checker/tests/if_range_condition_err.vv:2:5: error: range cannot be used as a condition, iterate with `for i in 0 .. 10` instead
     1 | fn main() {
     2 |     if 0 .. 10 {
       |        ~~~~~~~
